@@ -1,0 +1,386 @@
+#!/usr/bin/env python3
+"""Send a Toasty agent toast, and optionally route your answer back to the agent.
+
+Identity:  --agent NAME [--provider P] [--model M] [--icon ICON]
+Kind:      --kind info|done|needs|failed   (needs/failed stay until handled)
+Code:      --code TEXT   shown in monospace under the title; the message becomes a caption
+Reply:     --reply [--placeholder TEXT] [--suggest TEXT ...]
+           --expect CMD   expected foreground agent command (overrides name mapping)
+Actions:   --action ID=Label ...           (chosen ID is printed as "action:ID")
+Focus:     --skip-if-focused, --withdraw-if-focused (take it down once you look at the agent)
+Routing:   --kitty   use KITTY_WINDOW_ID / KITTY_LISTEN_ON / KITTY_PID from the
+                     environment: clicking the toast focuses that window, and a
+                     reply is typed into it followed by Enter.
+           --desktop-entry ID   app to focus on click when there's no kitty window
+           --open URL           link the shell opens on click instead (works after this exits)
+Waiting:   --detach  return at once and keep listening in the background
+           --timeout SECONDS (default 3600); the toast is withdrawn on timeout or when
+                     this process is told to stop (SIGTERM/SIGHUP/SIGINT)
+
+Without --kitty, replies print as "reply:TEXT" and clicks as "action:default".
+
+Wire format: see PROTOCOL.md (fd.o Notify, app name "Toasty|name|provider|model|icon",
+x-toasty-* hints). Markers in $XDG_RUNTIME_DIR/toasty/markers prove this process is listening.
+"""
+import argparse, json, os, signal, subprocess, sys, time
+
+p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+p.add_argument('--agent', required=True, help='Agent or app name')
+p.add_argument('--provider', default='', help='Provider, only when known')
+p.add_argument('--model', default='', help='Model, only when known')
+p.add_argument('--icon', default='', help='Icon theme name or absolute path')
+p.add_argument('--kind', default='info', choices=['info', 'done', 'needs', 'failed'])
+p.add_argument('--context', default='', help='Short label shown next to the time, e.g. the project')
+p.add_argument('--reply', action='store_true', help='Show an inline reply field')
+p.add_argument('--placeholder', default='', help='Reply field placeholder')
+p.add_argument('--suggest', action='append', default=[], help='Suggested reply (repeatable)')
+p.add_argument('--action', action='append', default=[], help='ID=Label button (repeatable)')
+p.add_argument('--kitty', action='store_true', help='Route clicks and replies to the calling kitty window')
+p.add_argument('--expect', default='', metavar='CMD', help='Expected foreground agent command basename')
+p.add_argument('--desktop-entry', default='', help='App to focus on click when not in kitty')
+p.add_argument('--open', default='', metavar='URL', help='Link the shell opens on click, e.g. codex://threads/<id>')
+p.add_argument('--code', default='', help='Code shown in monospace under the title; the message becomes its caption')
+p.add_argument('--detach', action='store_true', help='Return immediately, keep listening in the background')
+p.add_argument('--skip-if-focused', action='store_true', help="Don't toast if you're already looking at the agent")
+p.add_argument('--withdraw-if-focused', action='store_true',
+               help="Take the toast down (no answer) once you look at the agent, e.g. so a prompt "
+                    "that waits on this toast can show in the terminal instead")
+p.add_argument('--timeout', type=int, default=3600)
+p.add_argument('title')
+p.add_argument('message', nargs='?', default='')
+a = p.parse_args()
+
+fields = [a.agent, a.provider, a.model, a.icon]
+if any('|' in x or '\n' in x for x in fields):
+    p.error('identity fields cannot contain | or a newline')
+actions = []
+for spec in a.action:
+    ident, _, label = spec.partition('=')
+    if not ident or not label:
+        p.error(f'--action expects ID=Label, got {spec!r}')
+    actions.append((ident, label))
+
+kitty = None
+if a.kitty and os.environ.get('KITTY_WINDOW_ID') and os.environ.get('KITTY_LISTEN_ON'):
+    kitty = {'window': os.environ['KITTY_WINDOW_ID'], 'to': os.environ['KITTY_LISTEN_ON'],
+             'pid': os.environ.get('KITTY_PID', '')}
+def registry():
+    """The agent registry (agents.json): installed copy first, then the one beside this script."""
+    here = os.path.dirname(os.path.realpath(__file__))
+    for path in (os.path.join(os.environ.get('XDG_DATA_HOME', os.path.expanduser('~/.local/share')),
+                              'toasty', 'agents.json'),
+                 os.path.join(here, '..', 'share', 'agents.json')):
+        try:
+            with open(path) as f:
+                return {k: v for k, v in json.load(f).items() if isinstance(v, dict)}
+        except (OSError, ValueError):
+            continue
+    return {}
+
+def norm(value):
+    return ''.join(c for c in str(value).lower() if c.isalnum())
+
+agent_key = norm(a.agent)
+agent_entry = next((e for k, e in registry().items()
+                    if agent_key in {norm(k), norm(e.get('name', ''))} | {norm(x) for x in e.get('aliases', [])}), {})
+# Replies are typed only into a terminal whose foreground program is this agent.
+expected = os.path.basename(a.expect) if a.expect else agent_entry.get('command', '')
+can_reply = a.reply and (kitty is not None or (not a.kitty and not a.detach))
+listening = bool(kitty or actions or can_reply)
+
+LOG = os.path.join(os.environ.get('XDG_STATE_HOME', os.path.expanduser('~/.local/state')),
+                   'toasty', 'toasty.log')
+
+def log(msg):
+    try:
+        os.makedirs(os.path.dirname(LOG), exist_ok=True)
+        with open(LOG, 'a') as f:
+            f.write(time.strftime('%F %T ') + msg + '\n')
+    except OSError:
+        pass
+
+def already_focused():
+    try:
+        win = json.loads(subprocess.run(['niri', 'msg', '-j', 'focused-window'], capture_output=True,
+                                        text=True, timeout=3).stdout or 'null') or {}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+    if kitty:
+        if str(win.get('pid')) != kitty['pid']:
+            return False
+        r = subprocess.run(['kitty', '@', '--to', kitty['to'], 'ls', '--match', f"id:{kitty['window']}"],
+                           capture_output=True, text=True, timeout=3)
+        try:
+            return any(w.get('is_focused') for o in json.loads(r.stdout or '[]')
+                       for t in o.get('tabs', []) if t.get('is_focused') for w in t.get('windows', []))
+        except ValueError:
+            return False
+    entry = a.desktop_entry.lower()
+    return bool(entry) and str(win.get('app_id', '')).lower() == entry
+
+if a.skip_if_focused and already_focused():
+    sys.exit(0)
+
+# Fork before touching D-Bus: a GDBus connection must not cross a fork.
+if a.detach and listening:
+    if os.fork():
+        sys.exit(0)
+    os.setsid()
+    devnull = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(devnull, fd)
+
+import gi
+gi.require_version('Gio', '2.0')
+from gi.repository import Gio, GLib
+
+def emit(line):
+    if a.detach:
+        return
+    try:
+        print(line, flush=True)
+    except (BrokenPipeError, OSError):
+        # Whoever started us already has its answer and stopped reading (e.g. a permission
+        # hook that returned); a later click has no one to tell.
+        sys.stdout = open(os.devnull, 'w')
+
+def kitty_cmd(*args, data=None, timeout=5):
+    cmd = ['kitty', '@', '--to', kitty['to'], *args]
+    r = subprocess.run(cmd, input=data, capture_output=True, text=True, timeout=timeout)
+    if r.returncode:
+        log(f'kitty {args[0]} failed: {r.stderr.strip()}')
+    return r
+
+def niri_window_id():
+    """The niri window holding our kitty window, or None."""
+    try:
+        title = ''
+        for os_win in json.loads(kitty_cmd('ls').stdout or '[]'):
+            for tab in os_win.get('tabs', []):
+                for w in tab.get('windows', []):
+                    if str(w.get('id')) == kitty['window']:
+                        title = w.get('title', '')
+        wins = json.loads(subprocess.run(['niri', 'msg', '-j', 'windows'], capture_output=True,
+                                         text=True, timeout=5).stdout or '[]')
+        mine = [w for w in wins if str(w.get('pid')) == kitty['pid']] or \
+               [w for w in wins if 'kitty' in str(w.get('app_id', '')).lower()]
+        best = next((w for w in mine if w.get('title') == title), mine[0] if mine else None)
+        return best['id'] if best else None
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        log(f'niri window lookup failed: {e}')
+        return None
+
+def focus():
+    if not kitty:
+        return
+    kitty_cmd('focus-window', '--match', f"id:{kitty['window']}")
+    # kitty can't raise itself on Wayland, so ask niri for the OS window.
+    win = niri_window_id()
+    if win is not None:
+        subprocess.run(['niri', 'msg', 'action', 'focus-window', '--id', str(win)], timeout=5)
+
+def agent_owns_terminal():
+    """Match executable or interpreter script, never arbitrary command arguments."""
+    if not expected:
+        log(f'reply refused: {a.agent!r} has no "command" in agents.json; use --expect CMD')
+        return False
+    try:
+        result = kitty_cmd('ls', '--match', f"id:{kitty['window']}", timeout=0.4)
+        if result.returncode:
+            log('reply refused: could not inspect kitty foreground process')
+            return False
+        windows = [w for o in json.loads(result.stdout) for t in o.get('tabs', [])
+                   for w in t.get('windows', []) if str(w.get('id')) == kitty['window']]
+        commands = [p.get('cmdline', []) for w in windows for p in w.get('foreground_processes', [])]
+        interpreters = {'sh', 'bash', 'dash', 'zsh', 'python', 'python3', 'node', 'nodejs', 'ruby', 'perl'}
+        for cmd in commands:
+            if not cmd:
+                continue
+            executable = os.path.basename(cmd[0])
+            if executable == expected:
+                return True
+            # Shebang scripts appear as e.g. /bin/bash /path/to/claude. Never
+            # match `bash -c ...`, `node -e ...`, or an agent name passed as data.
+            if executable in interpreters and len(cmd) > 1 and not cmd[1].startswith('-'):
+                if os.path.basename(cmd[1]) == expected:
+                    return True
+        log(f'reply refused: kitty window {kitty["window"]} foreground is not {expected!r}')
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
+        log(f'reply refused: foreground check failed: {error}')
+    return False
+
+
+def type_reply(text):
+    try:
+        if not agent_owns_terminal():
+            return False
+        if kitty_cmd('send-text', '--match', f"id:{kitty['window']}", '--stdin',
+                     data=text, timeout=0.4).returncode:
+            return False
+        time.sleep(0.12)
+        return kitty_cmd('send-key', '--match', f"id:{kitty['window']}", 'enter',
+                         timeout=0.4).returncode == 0
+    except (OSError, subprocess.SubprocessError) as error:
+        log(f'reply delivery failed: {error}')
+        return False
+
+# Markers the shell reads (keyed by notification id): <id>.alive (our pid) while this process
+# listens, <id>.delivered once a reply has actually reached its destination.
+MARKERS = os.path.join(os.environ.get('XDG_RUNTIME_DIR') or f'/tmp/toasty-{os.getuid()}', 'toasty', 'markers')
+
+def prune_markers():
+    """Drop markers left by helpers that were killed outright (their pid is gone)."""
+    try:
+        names = os.listdir(MARKERS)
+    except OSError:
+        return
+    for name in names:
+        if not name.endswith('.alive'):
+            continue
+        path = os.path.join(MARKERS, name)
+        try:
+            with open(path) as f:
+                os.kill(int(f.read().strip() or 0), 0)
+        except ProcessLookupError:
+            for suffix in ('.alive', '.delivered'):
+                try:
+                    os.remove(path[:-len('.alive')] + suffix)
+                except OSError:
+                    pass
+        except (OSError, ValueError):
+            pass
+
+def marker(suffix):
+    return os.path.join(MARKERS, f'{nid}.{suffix}')
+
+def clear_markers():
+    for suffix in ('alive', 'delivered'):
+        try:
+            os.remove(marker(suffix))
+        except OSError:
+            pass
+
+bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+action_list = []
+if kitty:
+    action_list += ['default', 'Open']
+for ident, label in actions:
+    action_list += [ident, label]
+if can_reply:
+    # Quickshell shows the inline-reply action's label as the field placeholder.
+    action_list += ['inline-reply', a.placeholder or f'Reply to {a.agent}…']
+
+hints = {
+    'urgency': GLib.Variant('y', 2 if a.kind in ('needs', 'failed') else 1),
+    'x-toasty-kind': GLib.Variant('s', a.kind),
+    # Otherwise the server closes the toast the moment you reply, before the shell can show
+    # whether the reply was delivered. The shell dismisses it itself once it's handled.
+    'resident': GLib.Variant('b', True),
+}
+if kitty:
+    # Lets the shell still open the session if this process is gone by the time you click.
+    win = niri_window_id()
+    if win is not None:
+        hints['x-toasty-window'] = GLib.Variant('s', str(win))
+if a.icon:
+    hints['image-path'] = GLib.Variant('s', a.icon)
+if a.context:
+    hints['x-toasty-context'] = GLib.Variant('s', a.context)
+if a.suggest:
+    hints['x-toasty-suggestions'] = GLib.Variant('s', '\n'.join(s.replace('\n', ' ') for s in a.suggest))
+if a.desktop_entry and not kitty:
+    hints['desktop-entry'] = GLib.Variant('s', a.desktop_entry)
+if a.open:
+    hints['x-toasty-open'] = GLib.Variant('s', a.open)
+if a.code:
+    hints['x-toasty-code'] = GLib.Variant('s', a.code)
+
+loop = GLib.MainLoop()
+nid = None
+
+def on_signal(_conn, _sender, _path, _iface, member, params):
+    args = params.unpack()
+    if args[0] != nid:
+        return
+    if member == 'ActionInvoked':
+        emit(f'action:{args[1]}')
+        if args[1] == 'default':
+            focus()
+    elif member == 'NotificationReplied':
+        if not can_reply:
+            log('reply refused: no reply receiver configured')
+            return
+        # A fresh attempt must never inherit an earlier acknowledgement.
+        try:
+            os.remove(marker('delivered'))
+        except FileNotFoundError:
+            pass
+        if kitty:
+            if type_reply(args[1]):
+                open(marker('delivered'), 'w').close()
+        else:
+            # stdout is a handoff, not proof that the caller delivered to an agent.
+            # Keep the event protocol but do not manufacture an acknowledgement.
+            try:
+                emit(f'reply:{args[1]}')
+            except (BrokenPipeError, OSError) as error:
+                log(f'reply stdout handoff failed: {error}')
+    elif member == 'NotificationClosed':
+        loop.quit()
+
+if listening:
+    for member in ('ActionInvoked', 'NotificationReplied', 'NotificationClosed'):
+        bus.signal_subscribe('org.freedesktop.Notifications', 'org.freedesktop.Notifications', member,
+                             '/org/freedesktop/Notifications', None, Gio.DBusSignalFlags.NONE, on_signal)
+
+try:
+    nid = bus.call_sync('org.freedesktop.Notifications', '/org/freedesktop/Notifications',
+                        'org.freedesktop.Notifications', 'Notify',
+                        GLib.Variant('(susssasa{sv}i)', ('Toasty|' + '|'.join(fields), 0, a.icon,
+                                                         a.title, a.message, action_list, hints, -1)),
+                        GLib.VariantType('(u)'), Gio.DBusCallFlags.NONE, 5000, None).unpack()[0]
+except GLib.Error as e:
+    log(f'Notify failed: {e.message}')
+    sys.exit(f'toasty-notify: {e.message}')
+
+def withdraw():
+    """Take our toast down: the question it asks no longer has anyone waiting on the answer."""
+    try:
+        bus.call_sync('org.freedesktop.Notifications', '/org/freedesktop/Notifications',
+                      'org.freedesktop.Notifications', 'CloseNotification', GLib.Variant('(u)', (nid,)),
+                      None, Gio.DBusCallFlags.NONE, 2000, None)
+    except GLib.Error:
+        pass
+
+def give_up():
+    withdraw()
+    loop.quit()
+    return False
+
+if listening:
+    os.makedirs(MARKERS, mode=0o700, exist_ok=True)
+    prune_markers()
+    clear_markers()
+    with open(marker('alive'), 'w') as f:
+        f.write(str(os.getpid()))
+    GLib.timeout_add_seconds(a.timeout, give_up)
+    if a.withdraw_if_focused:
+        def check_focus():
+            if not already_focused():
+                return True
+            log('withdrawn: the agent got focus')
+            return give_up()
+        GLib.timeout_add(700, check_focus)
+    # Whoever started us stopped waiting (e.g. Claude Code got its answer in the terminal).
+    try:
+        gi.require_version('GLibUnix', '2.0')
+        from gi.repository import GLibUnix
+        signal_add = GLibUnix.signal_add
+    except (ImportError, ValueError):
+        signal_add = GLib.unix_signal_add
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal_add(GLib.PRIORITY_HIGH, sig, give_up)
+    try:
+        loop.run()
+    finally:
+        clear_markers()

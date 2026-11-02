@@ -1,0 +1,337 @@
+#!/usr/bin/env python3
+"""toasty: set up and check Toasty, the notification toasts for AI coding agents.
+
+  toasty install [--link] [--migrate]   put the helpers on PATH and add Toasty's hooks
+  toasty uninstall                      remove exactly what install added
+  toasty doctor [--toast]               check every piece, and say what's missing
+
+install only ever adds its own entries to ~/.claude/settings.json, ~/.codex/hooks.json and
+~/.codex/config.toml, after backing each file up next to itself (*.toasty-backup-<time>).
+--link symlinks the helpers to this checkout instead of copying them (for development).
+--migrate also removes hook entries from Toasty's pre-release names (pond-claude-*, pond-codex-*).
+"""
+import argparse, json, os, re, shutil, subprocess, sys, time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+ROOT = os.path.dirname(HERE)
+HOME = os.path.expanduser('~')
+BIN = os.environ.get('TOASTY_BIN', os.path.join(HOME, '.local', 'bin'))
+DATA = os.path.join(os.environ.get('XDG_DATA_HOME', os.path.join(HOME, '.local', 'share')), 'toasty')
+RUNTIME = os.path.join(os.environ.get('XDG_RUNTIME_DIR') or f'/tmp/toasty-{os.getuid()}', 'toasty')
+CLAUDE_SETTINGS = os.path.join(HOME, '.claude', 'settings.json')
+CODEX_DIR = os.path.join(HOME, '.codex')
+CODEX_HOOKS = os.path.join(CODEX_DIR, 'hooks.json')
+CODEX_CONFIG = os.path.join(CODEX_DIR, 'config.toml')
+
+HELPERS = ['toasty-notify', 'toasty-claude-hook', 'toasty-claude-permission',
+           'toasty-codex-notify', 'toasty-codex-status', 'toasty-codex-permission']
+LEGACY = re.compile(r'/pond-(claude|codex)-[a-z]+$|/pond-agent-notify$')
+
+def path(name):
+    return os.path.join(BIN, name)
+
+def hook(name, **extra):
+    return {'type': 'command', 'command': path(name), **extra}
+
+# Which hook runs on which event. Status hooks are async (Claude) or short (Codex) so they
+# never slow an agent down; the permission hooks wait for your answer, under the agent's limit.
+CLAUDE_HOOKS = {
+    'Notification': [hook('toasty-claude-hook')],
+    'Stop': [hook('toasty-claude-hook')],
+    'StopFailure': [hook('toasty-claude-hook')],
+    'PermissionRequest': [hook('toasty-claude-permission', timeout=600), hook('toasty-claude-hook', **{'async': True})],
+    'UserPromptSubmit': [hook('toasty-claude-hook', **{'async': True})],
+    'PostToolUse': [hook('toasty-claude-hook', **{'async': True})],
+    'SessionEnd': [hook('toasty-claude-hook', **{'async': True})],
+}
+CODEX_HOOKS_WANTED = {
+    'UserPromptSubmit': [hook('toasty-codex-status', timeout=3)],
+    'PermissionRequest': [hook('toasty-codex-status', timeout=3), hook('toasty-codex-permission', timeout=600)],
+    'PostToolUse': [hook('toasty-codex-status', timeout=3)],
+    'Stop': [hook('toasty-codex-status', timeout=3)],
+    'Interrupt': [hook('toasty-codex-status', timeout=3)],
+    'SessionEnd': [hook('toasty-codex-status', timeout=3)],
+}
+
+def ours(command):
+    return os.path.basename(str(command)).startswith('toasty-')
+
+def backup(file):
+    if os.path.exists(file):
+        dest = f'{file}.toasty-backup-{time.strftime("%Y%m%d-%H%M%S")}'
+        shutil.copy2(file, dest)
+        return dest
+
+def load_json(file):
+    try:
+        with open(file) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+def save_json(file, data):
+    tmp = f'{file}.toasty-tmp'
+    with open(tmp, 'w') as f:
+        json.dump(data, f, indent=2)
+        f.write('\n')
+    os.replace(tmp, file)
+
+def strip_hooks(hooks, drop):
+    """Remove handlers whose command matches drop(); drop groups and events left empty."""
+    for event in list(hooks):
+        groups = []
+        for group in hooks[event]:
+            kept = [h for h in group.get('hooks', []) if not drop(h.get('command', ''))]
+            if kept:
+                groups.append({**group, 'hooks': kept})
+        if groups:
+            hooks[event] = groups
+        else:
+            del hooks[event]
+
+def add_hooks(hooks, wanted):
+    for event, handlers in wanted.items():
+        groups = hooks.setdefault(event, [])
+        have = {h.get('command') for g in groups for h in g.get('hooks', [])}
+        new = [h for h in handlers if h['command'] not in have]
+        if new:
+            groups.append({'hooks': new})
+
+def patch_hooks(file, wanted, migrate, remove=False):
+    data = load_json(file)
+    before = json.dumps(data, sort_keys=True)
+    hooks = data.setdefault('hooks', {})
+    if remove:
+        strip_hooks(hooks, ours)
+    else:
+        if migrate:
+            strip_hooks(hooks, lambda c: bool(LEGACY.search(str(c))))
+        add_hooks(hooks, wanted)
+    if not hooks:
+        data.pop('hooks')
+    if json.dumps(data, sort_keys=True) == before:
+        return 'unchanged'
+    saved = backup(file)
+    os.makedirs(os.path.dirname(file), exist_ok=True)
+    save_json(file, data)
+    return f'updated (backup: {saved})' if saved else 'created'
+
+NOTIFY_LINE = re.compile(r'^notify\s*=.*$', re.M)
+
+def patch_codex_notify(migrate, remove=False):
+    text = open(CODEX_CONFIG).read() if os.path.exists(CODEX_CONFIG) else ''
+    want = f'notify = ["{path("toasty-codex-notify")}"]'
+    current = NOTIFY_LINE.search(text)
+    if remove:
+        if not current or 'toasty-codex-notify' not in current.group(0):
+            return 'unchanged'
+        text = NOTIFY_LINE.sub('', text, count=1).lstrip('\n')
+    elif current:
+        if 'toasty-codex-notify' in current.group(0):
+            return 'unchanged'
+        if not (migrate and 'pond-codex-notify' in current.group(0)):
+            return f'left alone: notify already runs something else ({current.group(0)})'
+        text = NOTIFY_LINE.sub(want, text, count=1)
+    else:
+        # A top-level key has to come before the first [table].
+        first_table = re.search(r'^\[', text, re.M)
+        at = first_table.start() if first_table else len(text)
+        text = text[:at] + want + '\n' + text[at:]
+    saved = backup(CODEX_CONFIG)
+    with open(CODEX_CONFIG, 'w') as f:
+        f.write(text)
+    return f'updated (backup: {saved})' if saved else 'created'
+
+def install(args):
+    os.makedirs(BIN, exist_ok=True)
+    for name in HELPERS + ['toasty']:
+        src, dest = os.path.join(HERE, name), path(name)
+        if os.path.lexists(dest):
+            os.remove(dest)
+        if args.link:
+            os.symlink(src, dest)
+        else:
+            shutil.copy2(src, dest)
+    os.makedirs(DATA, exist_ok=True)
+    registry = os.path.join(DATA, 'agents.json')
+    if os.path.lexists(registry) and not os.path.islink(registry) and not args.link:
+        print(f'  agents.json: kept your copy at {registry}')
+    else:
+        if os.path.lexists(registry):
+            os.remove(registry)
+        (os.symlink if args.link else shutil.copy2)(os.path.join(ROOT, 'share', 'agents.json'), registry)
+    print(f'Helpers: {"linked" if args.link else "copied"} into {BIN}')
+    if os.path.isdir(os.path.dirname(CLAUDE_SETTINGS)):
+        print('Claude Code hooks:', patch_hooks(CLAUDE_SETTINGS, CLAUDE_HOOKS, args.migrate))
+    else:
+        print('Claude Code: not found, skipped')
+    if os.path.isdir(CODEX_DIR):
+        print('Codex hooks:', patch_hooks(CODEX_HOOKS, CODEX_HOOKS_WANTED, args.migrate))
+        print('Codex notify:', patch_codex_notify(args.migrate))
+        print('  Codex asks you to review new or changed hooks the next time it starts (CLI and app):'
+              '\n  choose "Trust all and continue", or Toasty\'s Codex hooks won\'t run.')
+    else:
+        print('Codex: not found, skipped')
+    print('\nNext: run `toasty doctor --toast`.')
+
+def uninstall(args):
+    for name in HELPERS + ['toasty']:
+        if os.path.lexists(path(name)):
+            os.remove(path(name))
+    registry = os.path.join(DATA, 'agents.json')
+    if os.path.islink(registry):
+        os.remove(registry)
+    if os.path.exists(CLAUDE_SETTINGS):
+        print('Claude Code hooks:', patch_hooks(CLAUDE_SETTINGS, {}, False, remove=True))
+    if os.path.exists(CODEX_HOOKS):
+        print('Codex hooks:', patch_hooks(CODEX_HOOKS, {}, False, remove=True))
+    if os.path.exists(CODEX_CONFIG):
+        print('Codex notify:', patch_codex_notify(False, remove=True))
+    print(f'Removed the helpers from {BIN}.' + (f' Your agents.json in {DATA} was kept.' if os.path.exists(registry) else ''))
+
+# ---- doctor ----
+
+def run(cmd, timeout=5, **kw):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **kw)
+    except (OSError, subprocess.SubprocessError) as e:
+        return subprocess.CompletedProcess(cmd, 127, '', str(e))
+
+def doctor(args):
+    problems = 0
+    def ok(msg): print(f'  ✓ {msg}')
+    def warn(msg): print(f'  ! {msg}')
+    def bad(msg, fix):
+        nonlocal problems
+        problems += 1
+        print(f'  ✗ {msg}\n      → {fix}')
+
+    print('Helpers')
+    for name in HELPERS:
+        found = shutil.which(name)
+        if found and os.access(found, os.X_OK):
+            ok(f'{name}')
+        else:
+            bad(f'{name} is not on PATH', 'run `toasty install` (and make sure ~/.local/bin is on PATH)')
+    if run([sys.executable, '-c', 'import gi; gi.require_version("Gio", "2.0")']).returncode:
+        bad('Python GObject (gi) is missing', 'install python-gobject (Arch) / python3-gi (Debian, Ubuntu)')
+    else:
+        ok('Python GObject')
+
+    print('Agent registry')
+    reg = next((p for p in (os.path.join(DATA, 'agents.json'), os.path.join(ROOT, 'share', 'agents.json'))
+                if os.path.exists(p)), None)
+    try:
+        agents = {k: v for k, v in json.load(open(reg)).items() if isinstance(v, dict)}
+        for e in agents.values():
+            for pattern in (e.get('title') or {}).values():
+                re.compile(pattern)
+        ok(f'{len(agents)} agents in {reg}')
+    except Exception as e:
+        bad(f'agents.json unreadable ({e})', 'run `toasty install` again, or fix the JSON')
+
+    print('Notification server')
+    info = run(['gdbus', 'call', '--session', '--dest', 'org.freedesktop.Notifications', '--object-path',
+                '/org/freedesktop/Notifications', '--method', 'org.freedesktop.Notifications.GetServerInformation'])
+    caps = run(['gdbus', 'call', '--session', '--dest', 'org.freedesktop.Notifications', '--object-path',
+                '/org/freedesktop/Notifications', '--method', 'org.freedesktop.Notifications.GetCapabilities'])
+    if info.returncode:
+        bad('no notification server on the session bus', 'start your shell or notification daemon')
+    else:
+        ok('server: ' + ' '.join(re.findall(r"'([^']*)'", info.stdout)[:2]))
+        for cap, why in (('actions', 'Allow/Deny buttons'), ('inline-reply', 'replying from the toast')):
+            (ok if cap in caps.stdout else warn)(f'{cap} {"supported" if cap in caps.stdout else "not supported: no " + why}')
+    # Any running Quickshell instance that answers the `toasty` IPC target is a Toasty client.
+    status = None
+    if shutil.which('qs'):
+        for instance in re.findall(r'^Instance (\S+):', run(['qs', 'list', '--all']).stdout, re.M):
+            status = run(['qs', 'ipc', '-i', instance, 'call', 'toasty', 'status'])
+            if status.returncode == 0 and status.stdout.startswith('{'):
+                break
+    if status and status.returncode == 0 and status.stdout.startswith('{'):
+        ok('Toasty shell client is running (agent toasts, dock, away card)')
+    else:
+        warn('no Toasty shell client found: toasts will look like plain notifications '
+             '(the full UI is the Quickshell client in Pond)')
+
+    print('Claude Code')
+    if os.path.exists(CLAUDE_SETTINGS):
+        hooks = load_json(CLAUDE_SETTINGS).get('hooks', {})
+        missing = [ev for ev, hs in CLAUDE_HOOKS.items()
+                   if not {h['command'] for h in hs} <= {h.get('command') for g in hooks.get(ev, []) for h in g.get('hooks', [])}]
+        legacy = [h.get('command') for gs in hooks.values() for g in gs for h in g.get('hooks', []) if LEGACY.search(str(h.get('command')))]
+        if missing:
+            bad(f'hooks missing for {", ".join(missing)}', 'run `toasty install`')
+        else:
+            ok('all hooks installed')
+        if legacy:
+            warn(f'old pre-release hooks still installed ({len(legacy)}): toasts may show twice; run `toasty install --migrate`')
+    else:
+        warn('not installed (no ~/.claude/settings.json)')
+
+    print('Codex')
+    if os.path.isdir(CODEX_DIR):
+        hooks = load_json(CODEX_HOOKS).get('hooks', {})
+        missing = [ev for ev, hs in CODEX_HOOKS_WANTED.items()
+                   if not {h['command'] for h in hs} <= {h.get('command') for g in hooks.get(ev, []) for h in g.get('hooks', [])}]
+        (bad(f'hooks missing for {", ".join(missing)}', 'run `toasty install`') if missing else ok('all hooks installed'))
+        text = open(CODEX_CONFIG).read() if os.path.exists(CODEX_CONFIG) else ''
+        line = NOTIFY_LINE.search(text)
+        if line and 'toasty-codex-notify' in line.group(0):
+            ok('notify runs toasty-codex-notify')
+        else:
+            bad('notify is not set to toasty-codex-notify', 'run `toasty install` (it won\'t replace another notify program)')
+    else:
+        warn('not installed (no ~/.codex)')
+
+    print('Desktop')
+    try:
+        os.makedirs(RUNTIME, mode=0o700, exist_ok=True)
+        probe = os.path.join(RUNTIME, '.doctor')
+        open(probe, 'w').close(); os.remove(probe)
+        ok(f'state folder writable ({RUNTIME})')
+    except OSError as e:
+        bad(f'cannot write {RUNTIME} ({e})', 'check XDG_RUNTIME_DIR')
+    if shutil.which('niri'):
+        (ok('niri: window focus and "already looking" checks') if run(['niri', 'msg', 'version']).returncode == 0
+         else warn('niri found but not answering'))
+    else:
+        warn('niri not found: clicking a toast can\'t raise windows, and toasts show even when you\'re looking')
+    if os.environ.get('KITTY_WINDOW_ID'):
+        if os.environ.get('KITTY_LISTEN_ON') and run(['kitty', '@', 'ls']).returncode == 0:
+            ok('kitty remote control: replies can be typed into this terminal')
+        else:
+            bad('kitty remote control is off: replies from toasts can\'t reach agents here',
+                'add `allow_remote_control socket-only` and `listen_on unix:@kitty` to kitty.conf, then restart kitty')
+    else:
+        warn('not running in kitty: replying from a toast works only for agents in kitty')
+
+    if args.toast and shutil.which('toasty-notify'):
+        print('Test toast')
+        r = run(['toasty-notify', '--agent', 'Toasty', '--kind', 'info', 'Toasty doctor',
+                 'If you can see this, toasts work.'])
+        if r.returncode:
+            bad(f'sending failed: {r.stderr.strip()}', 'see the notification server line above')
+        elif sys.stdin.isatty():
+            seen = input('  Did a toast saying "If you can see this, toasts work." appear? [y/n] ').strip().lower()
+            (ok('you saw it') if seen.startswith('y') else bad('you didn\'t see it', 'check that your shell or daemon shows notifications, and Do Not Disturb'))
+        else:
+            ok('sent (no terminal to ask whether you saw it)')
+
+    print('\nAll good.' if not problems else f'\n{problems} problem{"s" if problems > 1 else ""} to fix.')
+    return 1 if problems else 0
+
+def main():
+    p = argparse.ArgumentParser(prog='toasty', description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest='cmd', required=True)
+    i = sub.add_parser('install', help='put helpers on PATH and add hooks')
+    i.add_argument('--link', action='store_true', help='symlink to this checkout instead of copying')
+    i.add_argument('--migrate', action='store_true', help='also remove pre-release pond-* hook entries')
+    sub.add_parser('uninstall', help='remove what install added')
+    d = sub.add_parser('doctor', help='check the setup')
+    d.add_argument('--toast', action='store_true', help='also send a test toast')
+    args = p.parse_args()
+    return {'install': install, 'uninstall': uninstall, 'doctor': doctor}[args.cmd](args) or 0
+
+if __name__ == '__main__':
+    sys.exit(main())

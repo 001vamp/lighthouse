@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""Claude Code hook (Notification, Stop, StopFailure) → Toasty toast.
+
+Also reports each non-kitty session's state (UserPromptSubmit → working, PermissionRequest
+→ waiting, PostToolUse → working again, Stop → done, StopFailure → failed, SessionEnd → gone)
+to $XDG_RUNTIME_DIR/toasty/sessions.json for the agent dock.
+
+Stop:          "Done in <project>" with Claude's last message; reply field when in kitty.
+StopFailure:   "Couldn't finish" with the API error, a one-click "continue" reply, and the
+               terminal marked Failed in the agent dock until its next good turn.
+Notification:  permission prompts → sticky "Needs your permission" (click opens the window),
+               unless toasty-claude-permission is already showing Allow/Deny for it;
+               idle prompts → sticky reply toast, unless a Stop toast went out in the last 10 min.
+Never blocks Claude: toasty-notify is started detached and this always exits 0.
+"""
+import json, os, re, subprocess, sys, time
+
+NOTIFY = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toasty-notify')
+RUNTIME = os.path.join(os.environ.get('XDG_RUNTIME_DIR') or f'/tmp/toasty-{os.getuid()}', 'toasty')
+os.makedirs(RUNTIME, mode=0o700, exist_ok=True)
+
+def last_assistant_text(path):
+    try:
+        with open(path, 'rb') as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 256_000))
+            lines = f.read().decode('utf-8', 'replace').splitlines()
+    except OSError:
+        return ''
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if entry.get('type') != 'assistant':
+            continue
+        parts = [c.get('text', '') for c in entry.get('message', {}).get('content', [])
+                 if isinstance(c, dict) and c.get('type') == 'text']
+        text = re.sub(r'\s+', ' ', ' '.join(parts)).strip()
+        if text:
+            return text[:220] + ('…' if len(text) > 220 else '')
+    return ''
+
+def niri_window():
+    """The niri window holding this kitty window, so one failure marks one window,
+    not every window of a single-instance kitty. None if it can't be told apart."""
+    to, me, pid = (os.environ.get(k) for k in ('KITTY_LISTEN_ON', 'KITTY_WINDOW_ID', 'KITTY_PID'))
+    if not (to and me and pid):
+        return None
+    try:
+        title = next((w.get('title', '') for o in json.loads(subprocess.run(
+            ['kitty', '@', '--to', to, 'ls'], capture_output=True, text=True, timeout=2).stdout or '[]')
+            for t in o.get('tabs', []) for w in t.get('windows', []) if str(w.get('id')) == me), None)
+        mine = [w for w in json.loads(subprocess.run(['niri', 'msg', '-j', 'windows'], capture_output=True,
+                                                     text=True, timeout=2).stdout or '[]')
+                if str(w.get('pid')) == pid]
+        if len(mine) == 1:
+            return mine[0]['id']
+        return next((w['id'] for w in mine if title is not None and w.get('title') == title), None)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+def mark_failed(error):
+    """Tell the agent dock this terminal's last turn failed (or, with None, that it's fine again).
+    Keyed "win:<niri id>" when the window can be found, else by kitty pid as before."""
+    pid = os.environ.get('KITTY_PID')
+    if not pid:
+        return
+    path = os.path.join(RUNTIME, 'failures.json')
+    try:
+        with open(path) as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        state = {}
+    if not error and not state:
+        return  # nothing to clear; skip the window lookup on every good turn
+    win = niri_window()
+    key = f'win:{win}' if win is not None else pid
+    if error:
+        state[key] = {'error': error[:120], 'time': int(time.time())}
+    elif key in state:
+        del state[key]
+    else:
+        return
+    tmp = f'{path}.{os.getpid()}'
+    with open(tmp, 'w') as f:
+        json.dump(state, f)
+    os.replace(tmp, path)
+
+SESSIONS = os.path.join(RUNTIME, 'sessions.json')
+
+def set_session(data, project, state, only_from=None):
+    """Report a session's state to the agent dock (None = it ended). Kitty sessions are
+    skipped: the dock reads those from their window title."""
+    sid = data.get('session_id')
+    if not sid or os.environ.get('KITTY_WINDOW_ID'):
+        return
+    import fcntl
+    with open(SESSIONS + '.lock', 'w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            with open(SESSIONS) as f:
+                sessions = json.load(f)
+        except (OSError, ValueError):
+            sessions = {}
+        current = sessions.get(sid, {}).get('state')
+        if (only_from and current not in only_from) or (state and current == state) \
+                or (state is None and sid not in sessions):
+            return
+        if state is None:
+            del sessions[sid]
+        else:
+            sessions[sid] = {'agent': 'Claude Code', 'project': project, 'state': state,
+                             'time': int(time.time()),
+                             'app': 'com.anthropic.Claude' if os.environ.get('CLAUDE_CODE_DESKTOP_APP_VERSION') else ''}
+        tmp = f'{SESSIONS}.{os.getpid()}'
+        with open(tmp, 'w') as f:
+            json.dump(sessions, f)
+        os.replace(tmp, SESSIONS)
+
+def notify(*args):
+    cmd = [NOTIFY, '--agent', 'Claude Code', '--provider', 'Anthropic', '--detach', '--skip-if-focused']
+    if os.environ.get('KITTY_WINDOW_ID'):
+        cmd.append('--kitty')
+    elif os.environ.get('CLAUDE_CODE_DESKTOP_APP_VERSION'):
+        cmd += ['--desktop-entry', 'com.anthropic.Claude']
+    subprocess.run(cmd + list(args), stdin=subprocess.DEVNULL, timeout=10)
+
+def main():
+    data = json.load(sys.stdin)
+    event = data.get('hook_event_name', '')
+    project = os.path.basename(data.get('cwd') or os.getcwd()) or 'Claude Code'
+    stamp = os.path.join(RUNTIME, f"claude-stop-{data.get('session_id', 'none')}")
+    can_reply = bool(os.environ.get('KITTY_WINDOW_ID'))
+
+    # Status only (these run async and never toast).
+    if event == 'UserPromptSubmit':
+        return set_session(data, project, 'working')
+    if event == 'PostToolUse':  # a tool ran, so any permission prompt was answered
+        return set_session(data, project, 'working', only_from=('waiting',))
+    if event == 'PermissionRequest':
+        return set_session(data, project, 'waiting')
+    if event == 'SessionEnd':
+        return set_session(data, project, None)
+    if event == 'Stop':
+        set_session(data, project, 'done')
+    elif event == 'StopFailure':
+        set_session(data, project, 'failed')
+    elif event == 'Notification' and 'permission' in data.get('message', '').lower():
+        set_session(data, project, 'waiting')
+
+    if event == 'StopFailure':
+        error = data.get('last_assistant_message') or data.get('error_details') or 'The turn failed.'
+        error = re.sub(r'^API Error:\s*', '', error).strip()
+        mark_failed(error)
+        notify('--kind', 'failed', '--context', project,
+               *(['--reply', '--suggest', 'continue'] if can_reply else []),
+               f"Couldn't finish in {project}", error)
+    elif event == 'Stop':
+        mark_failed(None)
+        if data.get('stop_hook_active'):
+            return
+        message = last_assistant_text(data.get('transcript_path', '')) or 'Finished its turn.'
+        notify('--kind', 'done', '--context', project, *(['--reply'] if can_reply else []), f'Done in {project}', message)
+        open(stamp, 'w').close()
+    elif event == 'Notification':
+        message = data.get('message', '')
+        if 'permission' in message.lower():
+            # toasty-claude-permission already put up an Allow/Deny toast for this prompt.
+            if os.path.exists(os.path.join(RUNTIME, f"claude-perm-{data.get('session_id', 'none')}")):
+                return
+            notify('--kind', 'needs', '--context', project, 'Needs your permission', message)
+        else:
+            try:
+                if time.time() - os.path.getmtime(stamp) < 600:
+                    return
+            except OSError:
+                pass
+            notify('--kind', 'needs', '--context', project, *(['--reply'] if can_reply else []),
+                   f'Waiting in {project}', message or 'Claude is waiting for your input.')
+
+try:
+    main()
+except Exception as e:  # a broken toast must never break Claude
+    print(f'toasty-claude-hook: {e}', file=sys.stderr)
+sys.exit(0)

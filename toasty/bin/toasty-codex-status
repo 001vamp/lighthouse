@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""Codex lifecycle input on stdin -> Toasty's shared session registry.
+
+No stdout: status reporting must never affect permissions or continue a turn.
+"""
+import fcntl
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+import time
+
+
+def update(data):
+    sid = data.get('thread-id') or data.get('session_id')
+    # Kitty sessions are skipped, like Claude's: the dock reads those from their window title.
+    if not isinstance(sid, str) or not sid or os.environ.get('KITTY_WINDOW_ID'):
+        return
+    event = data.get('hook_event_name') or data.get('type')
+    states = {'UserPromptSubmit': 'working', 'PermissionRequest': 'waiting',
+              'PostToolUse': 'working', 'Stop': 'done',
+              'agent-turn-complete': 'done', 'StopFailure': 'failed'}
+    ended = event in ('SessionEnd', 'Interrupt')
+    if not ended and event not in states:
+        return
+    runtime = os.environ.get('XDG_RUNTIME_DIR')
+    if not runtime:
+        raise RuntimeError('XDG_RUNTIME_DIR is unset')
+    runtime = os.path.join(runtime, 'toasty')
+    os.makedirs(runtime, mode=0o700, exist_ok=True)
+    path = Path(runtime) / 'sessions.json'
+    with open(str(path) + '.lock', 'a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            sessions = json.loads(path.read_text())
+        except FileNotFoundError:
+            sessions = {}
+        if not isinstance(sessions, dict):
+            raise ValueError('session registry is not an object')
+        if ended:
+            if sid not in sessions:
+                return
+            del sessions[sid]
+        else:
+            # Tool completions only resume a waiting session. They must not
+            # resurrect an interrupted session or overwrite a finished turn.
+            if event == 'PostToolUse' and sessions.get(sid, {}).get('state') != 'waiting':
+                return
+            project = Path(data.get('cwd') or os.getcwd()).name or 'Codex'
+            sessions[sid] = {'agent': 'Codex', 'project': project,
+                             'state': states[event], 'time': int(time.time()),
+                             'app': 'chatgpt', 'open': 'codex://threads/' + sid}
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', dir=runtime,
+                    prefix='sessions.', delete=False) as output:
+                temporary = output.name
+                json.dump(sessions, output)
+            os.replace(temporary, path)
+        finally:
+            if temporary and os.path.exists(temporary):
+                os.unlink(temporary)
+
+
+def main():
+    try:
+        update(json.load(sys.stdin))
+    except Exception as error:
+        print(f'toasty-codex-status: {error}', file=sys.stderr)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

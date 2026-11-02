@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""Codex PermissionRequest hook → Toasty toast with Allow / Deny.
+
+Mirrors toasty-claude-permission. Codex 0.165 accepts only allow/deny (+ message) here:
+updatedPermissions fails closed, so there is no "Always allow" button. Clicking the toast
+body, closing it, a timeout, or any error gives no decision, so Codex's own approval
+prompt decides. Unlike Claude, Codex waits for this hook before showing its prompt (the
+terminal just says "Running hooks"), so the toast also steps aside as soon as you look at
+the agent: no decision, and Codex's own prompt appears there.
+"""
+import json, os, re, signal, subprocess, sys
+
+NOTIFY = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toasty-notify')
+LOG = os.path.join(os.environ.get('XDG_STATE_HOME', os.path.expanduser('~/.local/state')),
+                   'toasty', 'toasty.log')
+WAIT = 570  # stay under the 600s timeout in ~/.codex/hooks.json
+
+def log(msg):
+    try:
+        import time
+        with open(LOG, 'a') as f:
+            f.write(time.strftime('%F %T ') + 'codex-permission: ' + msg + '\n')
+    except OSError:
+        pass
+
+def one_line(text, limit=200):
+    text = re.sub(r'\s+', ' ', str(text or '')).strip()
+    return text[:limit] + ('…' if len(text) > limit else '')
+
+def describe(tool, args, cwd):
+    """A question title and the exact thing being approved."""
+    if not isinstance(args, dict):
+        return f'Use {tool}?', one_line(json.dumps(args, ensure_ascii=False))
+    command = args.get('command') or args.get('cmd')
+    if command:
+        if isinstance(command, list):
+            # ["bash", "-lc", "<script>"] → just the script.
+            command = command[-1] if len(command) >= 3 and command[1] in ('-c', '-lc') else ' '.join(map(str, command))
+        return 'Run this command?', one_line(command)
+    patch = args.get('patch') or args.get('input') or ''
+    files = re.findall(r'^\*\*\* (?:Add|Update|Delete) File: (.+)$', str(patch), re.M)
+    if files:
+        rel = [os.path.relpath(f, cwd) if cwd and f.startswith(cwd + os.sep) else f for f in files]
+        return ('Edit this file?' if len(rel) == 1 else 'Edit these files?'), one_line(', '.join(rel))
+    if tool.startswith('mcp__'):
+        server, _, name = tool[5:].partition('__')
+        return f'Use {server} › {name}?', one_line(json.dumps(args, ensure_ascii=False))
+    return f'Use {tool}?', one_line(json.dumps(args, ensure_ascii=False))
+
+def decide(behavior, **extra):
+    print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PermissionRequest',
+                                             'decision': {'behavior': behavior, **extra}}}), flush=True)
+
+def main():
+    data = json.load(sys.stdin)
+    tool, args = data.get('tool_name', ''), data.get('tool_input')
+    cwd = data.get('cwd') or os.getcwd()
+    project = os.path.basename(cwd) or 'Codex'
+    title, detail = describe(tool, args, cwd)
+    kitty = bool(os.environ.get('KITTY_WINDOW_ID'))
+    log(f"tool={tool} session={data.get('session_id', '-')} kitty={kitty} keys={sorted(args) if isinstance(args, dict) else type(args).__name__}")
+
+    cmd = [NOTIFY, '--agent', 'Codex', '--provider', 'OpenAI', '--kind', 'needs',
+           '--context', project, '--skip-if-focused', '--withdraw-if-focused', '--timeout', str(WAIT),
+           '--action', 'allow=Allow', '--action', 'deny=Deny']
+    if kitty:
+        cmd.append('--kitty')
+    else:
+        cmd += ['--desktop-entry', 'chatgpt']
+        if data.get('session_id'):
+            cmd += ['--open', f"codex://threads/{data['session_id']}"]
+
+    helper = subprocess.Popen(cmd + ['--code', detail or tool, title, ''], stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, text=True)
+    # If Codex stops us (answered in the terminal, or its timeout), take the toast down too.
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(sig, lambda *_: (helper.terminate(), sys.exit(0)))
+    for line in helper.stdout:
+        choice = line.strip().removeprefix('action:')
+        if choice == 'allow':
+            decide('allow')
+        elif choice == 'deny':
+            decide('deny', message='Denied from the Toasty notification.')
+        else:
+            continue
+        log(f'decided {choice}')
+        break
+
+try:
+    main()
+except Exception as e:  # never break Codex: no output means its own prompt decides
+    log(f'error: {e}')
+    print(f'toasty-codex-permission: {e}', file=sys.stderr)
+sys.exit(0)

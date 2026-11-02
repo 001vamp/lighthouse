@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""Codex `notify` program → Toasty toast. Codex passes one JSON argument.
+
+In kitty the toast takes replies and typing goes back to that window. Anywhere else
+(the ChatGPT/Codex desktop app) it's read-only, and clicking opens the exact thread.
+Every run is logged, so we can tell which Codex frontends actually call this.
+"""
+import json, os, re, subprocess, sys, time
+
+NOTIFY = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toasty-notify')
+LOG = os.path.join(os.environ.get('XDG_STATE_HOME', os.path.expanduser('~/.local/state')),
+                   'toasty', 'toasty.log')
+
+def log(msg):
+    try:
+        os.makedirs(os.path.dirname(LOG), exist_ok=True)
+        with open(LOG, 'a') as f:
+            f.write(time.strftime('%F %T ') + 'codex-notify: ' + msg + '\n')
+    except OSError:
+        pass
+
+try:
+    payload = json.loads(sys.argv[-1])
+    in_kitty = bool(os.environ.get('KITTY_WINDOW_ID') and os.environ.get('KITTY_LISTEN_ON'))
+    thread = str(payload.get('thread-id') or '')
+    log(f"type={payload.get('type')} thread={thread or '-'} kitty={in_kitty} parent={os.getppid()}")
+    if payload.get('type') == 'agent-turn-complete':
+        subprocess.run([os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toasty-codex-status')],
+                       input=json.dumps(payload), text=True, timeout=3)
+        project = os.path.basename(payload.get('cwd') or os.getcwd()) or 'Codex'
+        text = re.sub(r'\s+', ' ', payload.get('last-assistant-message') or '').strip()
+        message = (text[:220] + ('…' if len(text) > 220 else '')) or 'Finished its turn.'
+        cmd = [NOTIFY, '--agent', 'Codex', '--provider', 'OpenAI', '--kind', 'done', '--context', project,
+               '--detach', '--skip-if-focused']
+        if in_kitty:
+            cmd += ['--kitty', '--reply']
+        else:
+            # No supported way to reply into a desktop thread yet, so no reply box.
+            cmd += ['--desktop-entry', 'chatgpt']
+            if thread:
+                cmd += ['--open', f'codex://threads/{thread}']
+        subprocess.run(cmd + [f'Done in {project}', message], stdin=subprocess.DEVNULL, timeout=10)
+except Exception as e:
+    log(f'error: {e}')
+    print(f'toasty-codex-notify: {e}', file=sys.stderr)
+sys.exit(0)

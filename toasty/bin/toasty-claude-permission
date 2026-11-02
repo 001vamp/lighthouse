@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Claude Code PermissionRequest hook → Toasty toast with Allow / Deny / Always allow.
+
+Claude shows its own permission dialog at the same time, and whichever you answer first
+wins: answering in the terminal makes Claude stop this hook (SIGTERM), and the helper
+then withdraws the toast. Clicking the toast body, closing it, or a timeout gives no
+decision, so Claude's own dialog stays the one in charge.
+"""
+import json, os, re, signal, subprocess, sys
+
+NOTIFY = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toasty-notify')
+RUNTIME = os.path.join(os.environ.get('XDG_RUNTIME_DIR') or f'/tmp/toasty-{os.getuid()}', 'toasty')
+os.makedirs(RUNTIME, mode=0o700, exist_ok=True)
+WAIT = 570  # stay under Claude's 600s default hook timeout
+
+EDIT_TOOLS = {'Edit', 'Write', 'MultiEdit', 'NotebookEdit'}
+
+def one_line(text, limit=200):
+    text = re.sub(r'\s+', ' ', str(text or '')).strip()
+    return text[:limit] + ('…' if len(text) > limit else '')
+
+def describe(tool, args, cwd):
+    """A question title and the exact thing being approved."""
+    def rel(path):
+        path = str(path or '')
+        return os.path.relpath(path, cwd) if cwd and path.startswith(cwd + os.sep) else path
+    if tool == 'Bash':
+        return 'Run this command?', one_line(args.get('command'))
+    if tool in EDIT_TOOLS:
+        return 'Edit this file?', rel(args.get('file_path') or args.get('notebook_path'))
+    if tool == 'WebFetch':
+        return 'Open this page?', one_line(args.get('url'))
+    if tool == 'WebSearch':
+        return 'Search the web?', one_line(args.get('query'))
+    if tool.startswith('mcp__'):
+        server, _, name = tool[5:].partition('__')
+        return f'Use {server} › {name}?', one_line(json.dumps(args, ensure_ascii=False))
+    return f'Use {tool}?', one_line(json.dumps(args, ensure_ascii=False))
+
+def decide(behavior, **extra):
+    print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PermissionRequest',
+                                             'decision': {'behavior': behavior, **extra}}}))
+
+def main():
+    data = json.load(sys.stdin)
+    tool, args = data.get('tool_name', ''), data.get('tool_input') or {}
+    cwd = data.get('cwd') or os.getcwd()
+    project = os.path.basename(cwd) or 'Claude Code'
+    # Claude's suggestions can also switch the permission mode (e.g. to accept-edits) or add
+    # folders. "Always allow" should only ever mean "remember an allow rule for this", so pass
+    # on nothing else.
+    suggestions = [s for s in data.get('permission_suggestions') or []
+                   if s.get('type') == 'addRules' and s.get('behavior') == 'allow']
+    title, detail = describe(tool, args, cwd)
+
+    cmd = [NOTIFY, '--agent', 'Claude Code', '--provider', 'Anthropic', '--kind', 'needs',
+           '--context', project, '--skip-if-focused', '--timeout', str(WAIT),
+           '--action', 'allow=Allow', '--action', 'deny=Deny']
+    caption = ''
+    if suggestions:
+        cmd += ['--action', 'always=Always allow']
+        # Say exactly what "always" would remember, e.g. "Always allow covers: git init *".
+        covered = [r.get('ruleContent') or r.get('toolName', '') for s in suggestions for r in s.get('rules', [])]
+        caption = f"Always allow covers: {', '.join(covered)}"
+    if os.environ.get('KITTY_WINDOW_ID'):
+        cmd.append('--kitty')
+    elif os.environ.get('CLAUDE_CODE_DESKTOP_APP_VERSION'):
+        cmd += ['--desktop-entry', 'com.anthropic.Claude']
+
+    # While this toast is up, the Notification hook skips its own "needs permission" toast.
+    marker = os.path.join(RUNTIME, f"claude-perm-{data.get('session_id', 'none')}")
+    open(marker, 'w').close()
+    # The question is the title, the exact command/path/URL goes in a monospace block.
+    helper = subprocess.Popen(cmd + ['--code', detail or tool, title, caption], stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, text=True)
+    # Claude stops us when you answer in the terminal: pass it on so the toast goes away.
+    signal.signal(signal.SIGTERM, lambda *_: (helper.terminate(), sys.exit(0)))
+    try:
+        for line in helper.stdout:
+            choice = line.strip().removeprefix('action:')
+            if choice == 'allow':
+                decide('allow')
+            elif choice == 'always':
+                decide('allow', updatedPermissions=suggestions)
+            elif choice == 'deny':
+                decide('deny', message='Denied from the Toasty notification.')
+            else:
+                continue
+            break
+    finally:
+        try:
+            os.remove(marker)
+        except OSError:
+            pass
+
+try:
+    main()
+except Exception as e:  # never break Claude: no output means its own dialog decides
+    print(f'toasty-claude-permission: {e}', file=sys.stderr)
+sys.exit(0)

@@ -1,0 +1,29 @@
+{
+  "_comment": "Toasty agent registry. One entry per agent: how to recognise it, what it looks like, and what it can do. Add an agent here instead of editing code.",
+  "claude": {
+    "name": "Claude Code",
+    "provider": "Anthropic",
+    "aliases": ["claude", "claudecode", "anthropic", "comanthropicclaude"],
+    "accent": "#E07A4F",
+    "mascot": "claudey.png",
+    "command": "claude",
+    "app": "com.anthropic.Claude",
+    "title": { "working": "^[◐◑] ", "idle": "^✳ " },
+    "can": { "reply": true, "permission": true, "always": true, "failed": true }
+  },
+  "codex": {
+    "name": "Codex",
+    "provider": "OpenAI",
+    "aliases": ["codex", "openai", "chatgpt"],
+    "accent": "#8B5CF6",
+    "mascot": "codex.png",
+    "command": "codex",
+    "app": "chatgpt",
+    "title": { "working": "^[⠀-⣿] ", "waiting": "^\\[\\s*[!.]\\s*\\](\\s|$)" },
+    "can": { "reply": true, "permission": true, "always": false, "failed": false }
+  },
+  "openbot": { "name": "OpenBot", "aliases": ["openbot"], "accent": "#0D9488", "mascot": "ghost-openbot.png", "command": "openbot" },
+  "grok": { "name": "Grok Bot", "aliases": ["grok", "grokbot"], "accent": "#3B82F6", "mascot": "ghost-grok.png", "command": "grokbot" },
+  "muse": { "name": "Muse", "aliases": ["muse"], "accent": "#DB2777", "mascot": "cat.png", "command": "muse" },
+  "hermes": { "name": "Hermes", "aliases": ["hermes"], "accent": "#CA8A04", "mascot": "hermes.png", "avatar": true, "command": "hermes" }
+}
