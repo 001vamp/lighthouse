@@ -18,7 +18,7 @@ bin/toasty install
 toasty doctor --toast
 ```
 
-`install` copies the helpers into `~/.local/bin` and adds Toasty's hooks to `~/.claude/settings.json`, `~/.codex/hooks.json` and `~/.codex/config.toml`. If you run Pond, it also adds Toasty's [shell client](shell/) to it; restart the shell afterwards.
+`install` copies the helpers into `~/.local/bin` and adds Toasty's hooks to `~/.claude/settings.json`, `~/.codex/hooks.json` and `~/.codex/config.toml`. If you run Pond, it also adds Toasty's [shell client](shell/) to it and restarts Pond.
 
 - It only ever adds its own entries. It backs up each file next to itself first (`*.toasty-backup-<time>`).
 - It never replaces a Codex `notify` program you already use.

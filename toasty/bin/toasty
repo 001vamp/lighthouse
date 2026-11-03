@@ -177,6 +177,23 @@ def overlay_stamp():
     except (OSError, ValueError):
         return None
 
+def restart_pond():
+    """Stop every running packaged-or-overlay Pond and start `qs -c pond-shell` again, which now
+    resolves to whichever one is installed. `qs kill -c` alone would only find the new path."""
+    pond_dirs = {os.path.realpath(d) for d in (POND_OVERLAY, POND_PACKAGED, '/etc/xdg/quickshell/pond-shell')}
+    listing = run(['qs', 'list', '--all']).stdout
+    stopped = 0
+    for instance, config in re.findall(r'^Instance (\S+):.*?^\s*Config path: ([^\n]+)$', listing, re.M | re.S):
+        if os.path.realpath(os.path.dirname(config.strip())) in pond_dirs:
+            stopped += run(['qs', 'kill', '-i', instance]).returncode == 0
+    if not stopped:
+        return 'no running Pond found: it picks this up the next time it starts'
+    if shutil.which('niri') and run(['niri', 'msg', 'action', 'spawn', '--', 'qs', '-c', 'pond-shell']).returncode == 0:
+        return 'Pond restarted'
+    subprocess.Popen(['qs', '-c', 'pond-shell'], start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return 'Pond restarted'
+
 def install_shell():
     """Put Toasty's shell client into the Pond that's actually running. Returns a status line."""
     if os.path.isfile(os.path.join(POND_DEV, 'notifications', 'AgentToast.qml')):
@@ -203,8 +220,7 @@ def install_shell():
     shutil.rmtree(POND_OVERLAY, ignore_errors=True)
     os.makedirs(os.path.dirname(POND_OVERLAY), exist_ok=True)
     os.replace(tmp, POND_OVERLAY)
-    return (f'installed into {POND_OVERLAY} (built on {stamp["pond"]})\n'
-            '  Restart the shell to load it:  qs kill -c pond-shell; niri msg action spawn -- qs -c pond-shell\n'
+    return (f'installed into {POND_OVERLAY} (built on {stamp["pond"]}); {restart_pond()}\n'
             '  After a Pond update, run `toasty install` again so you get the new Pond too.')
 
 def install(args):
@@ -255,7 +271,7 @@ def uninstall(args):
         print('Codex notify:', patch_codex_notify(False, remove=True))
     if overlay_stamp() is not None:
         shutil.rmtree(POND_OVERLAY)
-        print(f'Shell client: removed {POND_OVERLAY}; restart the shell to go back to the packaged Pond')
+        print(f'Shell client: removed {POND_OVERLAY}; {restart_pond()}')
     print(f'Removed the helpers from {BIN}.' + (f' Your agents.json in {DATA} was kept.' if os.path.exists(registry) else ''))
 
 # ---- doctor ----
@@ -323,10 +339,10 @@ def doctor(args):
         ok('Toasty shell client is running (agent toasts, dock, away card)')
     elif built:
         bad('Toasty\'s shell client is installed but not running',
-            'restart the shell: qs kill -c pond-shell; niri msg action spawn -- qs -c pond-shell')
+            'log out and back in, or run `toasty install` again')
     elif os.path.isdir(POND_PACKAGED):
         bad('Pond is installed without Toasty\'s shell client: toasts look like plain notifications',
-            'run `toasty install`, then restart the shell')
+            'run `toasty install`')
     else:
         warn('no Toasty shell client found: toasts will look like plain notifications '
              '(the full UI needs Pond, a Quickshell shell)')

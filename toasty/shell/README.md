@@ -7,9 +7,9 @@ The Quickshell side of Toasty: agent toasts, the dock row, the away card, and th
 
 `toasty install` puts these into the Pond you're running:
 
-- **Pond from a package** (`/usr/share/pond-interface`, run as `qs -c pond-shell`): it copies the packaged shell to `~/.config/quickshell/pond-shell`, adds `files/`, and applies `pond.patch`. Quickshell loads that copy instead of the packaged one. If the patch doesn't fit, nothing is changed. After a Pond update, `toasty doctor` says so; run `toasty install` again to rebuild on the new Pond.
+- **Pond from a package** (`/usr/share/pond-interface`, run as `qs -c pond-shell`): it copies the packaged shell to `~/.config/quickshell/pond-shell`, adds `files/`, and applies `pond.patch`. Quickshell loads that copy instead of the packaged one, at login too. If the patch doesn't fit, nothing is changed. After a Pond update, `toasty doctor` says so; run `toasty install` again to rebuild on the new Pond.
 - **A Pond checkout in `~/.local/share/pond-interface`** that already has Toasty: left as it is.
 
-Then restart the shell: `qs kill -c pond-shell; niri msg action spawn -- qs -c pond-shell`.
+Install and uninstall restart Pond for you. They stop the running Pond by its instance id, because `qs kill -c pond-shell` would look for the copy that was just added or removed, not the one that's running.
 
 The patch is made against Pond's `main` branch. Pond is under BSD 3-Clause, © Butterfly Interaction Inc. ([LICENSE-pond](LICENSE-pond)).
