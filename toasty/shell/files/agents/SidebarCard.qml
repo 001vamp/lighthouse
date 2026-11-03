@@ -71,9 +71,52 @@ Shell.Card {
   property bool ticking: false
   Timer { interval: 250; repeat: true; running: root.ticking; onTriggered: root.refresh() }
 
-  readonly property var inputs: [Shell.NiriMsg._windows, failed, sessions, focusedApp, seenAt]
+  readonly property var inputs: [Shell.NiriMsg._windows, failed, sessions, focusedApp, seenAt, agentPids]
   onInputsChanged: Qt.callLater(refresh)
   Component.onCompleted: refresh()
+
+  // A kitty window is an agent only while an agent's program runs inside it, or while its title
+  // shows an agent's marks. A plain shell never gets a row, whatever its title says.
+  // kitty pid → the registry entry whose `command` runs under it.
+  property var agentPids: ({})
+  readonly property bool hasKitty: Object.values(Shell.NiriMsg._windows).some(w => w.appId === "kitty")
+  Process {
+    id: processes
+    command: ["ps", "-eo", "pid=,ppid=,comm="]
+    stdout: StdioCollector { onStreamFinished: root.readProcesses(text) }
+  }
+  Timer {
+    interval: 2000; repeat: true; triggeredOnStart: true
+    running: root.hasKitty
+    onTriggered: processes.running = true
+    onRunningChanged: if (!running) root.agentPids = {}
+  }
+  function readProcesses(text) {
+    const children = {}, comm = {};
+    for (const line of text.split("\n")) {
+      const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
+      if (!m) continue;
+      comm[m[1]] = m[3];
+      (children[m[2]] = children[m[2]] || []).push(m[1]);
+    }
+    const byCommand = {};
+    for (const id in Notifications.State.registry) {
+      const e = Notifications.State.registry[id];
+      if (e.command) byCommand[e.command] = e;
+    }
+    const found = {};
+    for (const w of Object.values(Shell.NiriMsg._windows)) {
+      if (w.appId !== "kitty" || !w.pid || w.pid in found) continue;
+      found[w.pid] = null;
+      const queue = [String(w.pid)];
+      while (queue.length && !found[w.pid]) {
+        const pid = queue.shift();
+        if (pid !== String(w.pid) && byCommand[comm[pid]]) found[w.pid] = byCommand[comm[pid]];
+        queue.push(...(children[pid] || []));
+      }
+    }
+    if (JSON.stringify(found) !== JSON.stringify(root.agentPids)) root.agentPids = found;
+  }
 
   ListModel { id: rows }
 
@@ -86,8 +129,13 @@ Shell.Card {
     const windows = Shell.NiriMsg._windows;
     for (const id in windows) {
       const w = windows[id];
-      if (!Shell.NiriMsg._isAgent(w)) continue;
-      const title = w.title;
+      if (w.appId !== "kitty") continue;
+      const title = w.title || "";
+      const match = Notifications.State.agentForTitle(title);
+      // One kitty process can hold several windows; then only the title can say which is the agent.
+      const shared = Object.values(windows).filter(o => o.pid === w.pid).length > 1;
+      const running = shared ? null : root.agentPids[w.pid];
+      if (!match && !running) { delete root.knownAgent[w.id]; continue; }
       const busy = Shell.NiriMsg._needsAttention(title) ? "waiting"
           : Shell.NiriMsg._isWorking(title) ? "working" : "";
       raw[w.id] = busy;
@@ -98,9 +146,8 @@ Shell.Card {
       const failure = root.failed["win:" + w.id] || root.failed[w.pid];
       const state = busy || (failure ? "failed"
           : Shell.NiriMsg._unread[w.id] || inGrace ? "done" : "idle");
-      const match = Notifications.State.agentForTitle(title);
       if (match) root.knownAgent[w.id] = match.agent;
-      const agent = root.knownAgent[w.id];
+      const agent = root.knownAgent[w.id] || running;
       list.push({
         key: "win:" + w.id, winId: w.id, app: "", link: "", state, leaving: false,
         name: agent ? agent.name : "Agent",

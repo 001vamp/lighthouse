@@ -25,5 +25,6 @@
   "openbot": { "name": "OpenBot", "aliases": ["openbot"], "accent": "#0D9488", "mascot": "ghost-openbot.png", "command": "openbot" },
   "grok": { "name": "Grok Bot", "aliases": ["grok", "grokbot"], "accent": "#3B82F6", "mascot": "ghost-grok.png", "command": "grokbot" },
   "muse": { "name": "Muse", "aliases": ["muse"], "accent": "#DB2777", "mascot": "cat.png", "command": "muse" },
-  "hermes": { "name": "Hermes", "aliases": ["hermes"], "accent": "#CA8A04", "mascot": "hermes.png", "avatar": true, "command": "hermes" }
+  "hermes": { "name": "Hermes", "aliases": ["hermes"], "accent": "#CA8A04", "mascot": "hermes.png", "avatar": true, "command": "hermes" },
+  "opencode": { "name": "OpenCode", "aliases": ["opencode"], "accent": "#6366F1", "mascot": "ghost.png", "command": "opencode" }
 }
