@@ -1,10 +1,15 @@
 # Toasty shell client
 
-The Quickshell side of Toasty: agent toasts, the dock row, the away card, and the mascots.
-These are copies of the files that run inside [Pond](https://github.com/bflycomputer), kept here as a backup.
+The Quickshell side of Toasty: agent toasts, the dock row, the away card, and the mascots. It runs inside [Pond](https://github.com/bflycomputer/pond-interface), a Quickshell shell.
 
-- `notifications/`: goes into Pond's `shell/notifications/`.
-- `agents/SidebarCard.qml`: goes into Pond's `shell/agents/`.
-- `assets/agents/`: the mascots, referenced by `share/agents.json`.
+- `pond.patch` is Toasty's changes to Pond's own files: the notification state, the toast window, the notification card and the sidebar.
+- `files/` holds Toasty's new files, laid out like Pond's `shell/` folder: the agent toast and buttons, the dock card, and the mascots.
 
-`State.qml`, `Style.qml` and `ToastWindow.qml` are Pond's files with Toasty's changes added. Pond is under BSD 3-Clause, © Butterfly Interaction Inc. ([LICENSE-pond](LICENSE-pond)).
+`toasty install` puts these into the Pond you're running:
+
+- **Pond from a package** (`/usr/share/pond-interface`, run as `qs -c pond-shell`): it copies the packaged shell to `~/.config/quickshell/pond-shell`, adds `files/`, and applies `pond.patch`. Quickshell loads that copy instead of the packaged one. If the patch doesn't fit, nothing is changed. After a Pond update, `toasty doctor` says so; run `toasty install` again to rebuild on the new Pond.
+- **A Pond checkout in `~/.local/share/pond-interface`** that already has Toasty: left as it is.
+
+Then restart the shell: `qs kill -c pond-shell; niri msg action spawn -- qs -c pond-shell`.
+
+The patch is made against Pond's `main` branch. Pond is under BSD 3-Clause, © Butterfly Interaction Inc. ([LICENSE-pond](LICENSE-pond)).

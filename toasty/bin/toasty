@@ -23,6 +23,15 @@ CODEX_DIR = os.path.join(HOME, '.codex')
 CODEX_HOOKS = os.path.join(CODEX_DIR, 'hooks.json')
 CODEX_CONFIG = os.path.join(CODEX_DIR, 'config.toml')
 
+# Pond installed from a package lives read-only in /usr/share. Toasty's shell client goes into a
+# patched copy under ~/.config/quickshell/pond-shell, which Quickshell loads instead of the
+# packaged one (`qs -c pond-shell` looks in XDG_CONFIG_HOME first).
+POND_PACKAGED = os.environ.get('TOASTY_POND_PACKAGED', '/usr/share/pond-interface/shell')
+POND_DEV = os.environ.get('TOASTY_POND_DEV', os.path.join(HOME, '.local', 'share', 'pond-interface', 'shell'))
+POND_OVERLAY = os.path.join(os.environ.get('XDG_CONFIG_HOME', os.path.join(HOME, '.config')), 'quickshell', 'pond-shell')
+POND_MARKER = '.toasty'
+SHELL = os.path.join(ROOT, 'shell')
+
 HELPERS = ['toasty-notify', 'toasty-claude-hook', 'toasty-claude-permission',
            'toasty-codex-notify', 'toasty-codex-status', 'toasty-codex-permission']
 LEGACY = re.compile(r'/pond-(claude|codex)-[a-z]+$|/pond-agent-notify$')
@@ -142,6 +151,62 @@ def patch_codex_notify(migrate, remove=False):
         f.write(text)
     return f'updated (backup: {saved})' if saved else 'created'
 
+def pond_version():
+    """The packaged Pond's version, or its newest file time when pacman can't say."""
+    r = run(['pacman', '-Qqo', POND_PACKAGED])
+    if r.returncode == 0 and r.stdout.strip():
+        v = run(['pacman', '-Q', r.stdout.split()[0]])
+        if v.returncode == 0:
+            return v.stdout.strip()
+    return 'mtime ' + str(max(int(os.path.getmtime(os.path.join(d, f)))
+                              for d, _, fs in os.walk(POND_PACKAGED) for f in fs))
+
+def shell_stamp():
+    """What the overlay was built from: the Pond version plus a hash of Toasty's shell files."""
+    import hashlib
+    h = hashlib.sha256()
+    for d, _, fs in sorted(os.walk(SHELL)):
+        for f in sorted(fs):
+            h.update(f.encode())
+            h.update(open(os.path.join(d, f), 'rb').read())
+    return {'pond': pond_version(), 'toasty': h.hexdigest()[:16]}
+
+def overlay_stamp():
+    try:
+        return json.load(open(os.path.join(POND_OVERLAY, POND_MARKER)))
+    except (OSError, ValueError):
+        return None
+
+def install_shell():
+    """Put Toasty's shell client into the Pond that's actually running. Returns a status line."""
+    if os.path.isfile(os.path.join(POND_DEV, 'notifications', 'AgentToast.qml')):
+        return f'Pond checkout at {POND_DEV} already has Toasty: unchanged'
+    if not os.path.isdir(POND_PACKAGED):
+        return 'no Pond found: skipped (toasts will look like plain notifications)'
+    if os.path.lexists(POND_OVERLAY) and overlay_stamp() is None:
+        return f'left alone: {POND_OVERLAY} exists and isn\'t Toasty\'s'
+    stamp = shell_stamp()
+    if overlay_stamp() == stamp:
+        return f'unchanged ({POND_OVERLAY})'
+    tmp = POND_OVERLAY + '.toasty-tmp'
+    shutil.rmtree(tmp, ignore_errors=True)
+    shutil.copytree(POND_PACKAGED, tmp, symlinks=True)
+    shutil.copytree(os.path.join(SHELL, 'files'), tmp, dirs_exist_ok=True)
+    with open(os.path.join(SHELL, 'pond.patch')) as patch:
+        r = run(['patch', '-p1', '--batch', '--forward', '--no-backup-if-mismatch', '-d', tmp], stdin=patch, timeout=30)
+    if r.returncode:
+        shutil.rmtree(tmp)
+        return (f'✗ Toasty\'s changes don\'t fit this Pond ({stamp["pond"]}), so it was left as it is.\n'
+                f'  Toasts will look like plain notifications until Toasty is updated for it.\n  {r.stdout.strip()}')
+    with open(os.path.join(tmp, POND_MARKER), 'w') as f:
+        json.dump(stamp, f)
+    shutil.rmtree(POND_OVERLAY, ignore_errors=True)
+    os.makedirs(os.path.dirname(POND_OVERLAY), exist_ok=True)
+    os.replace(tmp, POND_OVERLAY)
+    return (f'installed into {POND_OVERLAY} (built on {stamp["pond"]})\n'
+            '  Restart the shell to load it:  qs kill -c pond-shell; niri msg action spawn -- qs -c pond-shell\n'
+            '  After a Pond update, run `toasty install` again so you get the new Pond too.')
+
 def install(args):
     os.makedirs(BIN, exist_ok=True)
     for name in HELPERS + ['toasty']:
@@ -172,6 +237,7 @@ def install(args):
               '\n  choose "Trust all and continue", or Toasty\'s Codex hooks won\'t run.')
     else:
         print('Codex: not found, skipped')
+    print('Shell client:', install_shell())
     print('\nNext: run `toasty doctor --toast`.')
 
 def uninstall(args):
@@ -187,6 +253,9 @@ def uninstall(args):
         print('Codex hooks:', patch_hooks(CODEX_HOOKS, {}, False, remove=True))
     if os.path.exists(CODEX_CONFIG):
         print('Codex notify:', patch_codex_notify(False, remove=True))
+    if overlay_stamp() is not None:
+        shutil.rmtree(POND_OVERLAY)
+        print(f'Shell client: removed {POND_OVERLAY}; restart the shell to go back to the packaged Pond')
     print(f'Removed the helpers from {BIN}.' + (f' Your agents.json in {DATA} was kept.' if os.path.exists(registry) else ''))
 
 # ---- doctor ----
@@ -248,11 +317,22 @@ def doctor(args):
             status = run(['qs', 'ipc', '-i', instance, 'call', 'toasty', 'status'])
             if status.returncode == 0 and status.stdout.startswith('{'):
                 break
-    if status and status.returncode == 0 and status.stdout.startswith('{'):
+    running = status and status.returncode == 0 and status.stdout.startswith('{')
+    built = overlay_stamp()
+    if running:
         ok('Toasty shell client is running (agent toasts, dock, away card)')
+    elif built:
+        bad('Toasty\'s shell client is installed but not running',
+            'restart the shell: qs kill -c pond-shell; niri msg action spawn -- qs -c pond-shell')
+    elif os.path.isdir(POND_PACKAGED):
+        bad('Pond is installed without Toasty\'s shell client: toasts look like plain notifications',
+            'run `toasty install`, then restart the shell')
     else:
         warn('no Toasty shell client found: toasts will look like plain notifications '
-             '(the full UI is the Quickshell client in Pond)')
+             '(the full UI needs Pond, a Quickshell shell)')
+    if built and os.path.isdir(POND_PACKAGED) and built.get('pond') != pond_version():
+        warn(f'Pond was updated ({built.get("pond")} → {pond_version()}): run `toasty install` to rebuild '
+             'the shell client on the new Pond')
 
     print('Claude Code')
     if os.path.exists(CLAUDE_SETTINGS):

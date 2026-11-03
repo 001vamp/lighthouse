@@ -297,7 +297,16 @@ class Install(unittest.TestCase):
         self.config = os.path.join(self.home, '.codex', 'config.toml')
         open(self.config, 'w').write('model = "x"\n\n[projects."/a"]\ntrust_level = "trusted"\n')
         self.env = dict(os.environ, HOME=self.home, XDG_DATA_HOME=os.path.join(self.home, 'data'),
-                        TOASTY_BIN=os.path.join(self.home, 'bin'))
+                        TOASTY_BIN=os.path.join(self.home, 'bin'), XDG_CONFIG_HOME=os.path.join(self.home, 'config'),
+                        TOASTY_POND_PACKAGED=os.path.join(self.home, 'no-pond'))
+        self.overlay = os.path.join(self.home, 'config', 'quickshell', 'pond-shell')
+
+    def fake_pond(self):
+        """A packaged Pond that Toasty's patch doesn't fit, like a future Pond version would be."""
+        pond = self.env['TOASTY_POND_PACKAGED']
+        os.makedirs(os.path.join(pond, 'notifications'))
+        for name in ('Sidebar.qml', 'notifications/State.qml', 'notifications/ToastWindow.qml', 'notifications/SidebarCard.qml'):
+            open(os.path.join(pond, name), 'w').write('Item {}\n')
 
     def tearDown(self):
         shutil.rmtree(self.home, ignore_errors=True)
@@ -339,6 +348,21 @@ class Install(unittest.TestCase):
         out = self.toasty('install')
         self.assertIn('left alone', out)
         self.assertIn('other-notifier', open(self.config).read())
+
+    def test_shell_left_alone_when_the_patch_does_not_fit(self):
+        self.fake_pond()
+        out = self.toasty('install')
+        self.assertIn("don't fit this Pond", out)
+        self.assertFalse(os.path.exists(self.overlay), 'the packaged Pond keeps running as it is')
+        self.assertFalse(os.path.exists(self.overlay + '.toasty-tmp'))
+
+    def test_never_touches_a_pond_config_that_is_not_ours(self):
+        self.fake_pond()
+        os.makedirs(self.overlay)
+        open(os.path.join(self.overlay, 'shell.qml'), 'w').write('// mine\n')
+        self.assertIn('left alone', self.toasty('install'))
+        self.toasty('uninstall')
+        self.assertEqual(open(os.path.join(self.overlay, 'shell.qml')).read(), '// mine\n')
 
 
 if __name__ == '__main__':

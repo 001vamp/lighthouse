@@ -1,0 +1,625 @@
+diff --git a/Sidebar.qml b/Sidebar.qml
+index 0b0f497..2b85ece 100644
+--- a/Sidebar.qml
++++ b/Sidebar.qml
+@@ -10,6 +10,7 @@ import "media" as Media
+ import "minimap" as Minimap
+ import "notifications" as Notifications
+ import "installs" as Installs
++import "agents" as Agents
+ import Pond.Screenshot as Screenshot
+ 
+ PanelWindow {
+@@ -100,7 +101,7 @@ PanelWindow {
+   Region {
+     id: cardBlur
+     regions: [timeCard.blurRegion, workspacesCard.blurRegion, mediaCard.blurRegion,
+-      notificationCard.blurRegion, installsCard.blurRegion, controls.blurRegion]
++      notificationCard.blurRegion, installsCard.blurRegion, agentsCard.blurRegion, controls.blurRegion]
+   }
+   // Keep compositor resizes out of the card animation; only the input area shrinks.
+   implicitWidth: Math.ceil(Math.max(Theme.sidebarOuterMargin + Theme.sidebarCardExpandedWidth + Theme.sidebarFadeWidth,
+@@ -158,8 +159,10 @@ PanelWindow {
+       maximumHeight: Math.max(64,
+           bottomStack.y - Theme.sidebarCardGap - mainStack.y
+           - timeCard.height - mediaCard.height - notificationCard.height - installsCard.height
++          - agentsCard.height
+           - (keyboardFeedback.visible ? keyboardFeedback.height + Theme.sidebarCardGap : 0)
+-          - Theme.sidebarCardGap * (2 + (mediaCard.visible ? 1 : 0) + (installsCard.visible ? 1 : 0)))
++          - Theme.sidebarCardGap * (2 + (mediaCard.visible ? 1 : 0) + (installsCard.visible ? 1 : 0)
++                                    + (agentsCard.visible ? 1 : 0)))
+       onFocusRequested: index => NiriMsg.focusWorkspace(index)
+       onWindowRequested: windowId => NiriMsg.focusWindow(windowId)
+       onAddRequested: workspaceId => NiriMsg.openLauncher(workspaceId)
+@@ -182,6 +185,12 @@ PanelWindow {
+       width: root.cardWidth
+       collapseProgress: root.collapseProgress
+     }
++
++    Agents.SidebarCard {
++      id: agentsCard
++      width: root.cardWidth
++      collapseProgress: root.collapseProgress
++    }
+     KeyboardFeedback {
+       id: keyboardFeedback
+       screen: root.screen
+diff --git a/notifications/SidebarCard.qml b/notifications/SidebarCard.qml
+index 73add93..f73913c 100644
+--- a/notifications/SidebarCard.qml
++++ b/notifications/SidebarCard.qml
+@@ -10,7 +10,8 @@ Item {
+   onYChanged: blurRegion.changed()
+   readonly property bool empty: Notifications.State.notificationCount === 0
+   signal panelRequested
+-  property real transientProgress: Notifications.State.transientVisible ? 1 : 0
++  property real transientProgress: Notifications.State.transientVisible
++      && !Notifications.State.agentInfo(Notifications.State.currentTransient) ? 1 : 0
+   readonly property real inlineAmount: transientProgress * (1 - Shell.Theme.collapseHeight(collapseProgress))
+   readonly property real previewOpacity: inlineAmount >= 0.54 ? 1 : 0
+   readonly property var notification: Notifications.State.currentTransient
+diff --git a/notifications/State.qml b/notifications/State.qml
+index 368ef1b..1bf1fa0 100644
+--- a/notifications/State.qml
++++ b/notifications/State.qml
+@@ -3,6 +3,7 @@ import QtQuick
+ import Quickshell
+ import Quickshell.Io
+ import Quickshell.Services.Notifications
++import Quickshell.Wayland
+ import ".." as Shell
+ 
+ Singleton {
+@@ -13,12 +14,87 @@ Singleton {
+   readonly property var recentApps: _recentApps(historyNotifications)
+   property string transientId: ""
+   property string transientOutputName: ""
++  // Toasts waiting their turn while another is on screen: critical ones first, then oldest first.
++  property var queue: []
+   readonly property var currentTransient: _findById(activeNotifications, transientId)
+   readonly property bool transientVisible: transientId !== "" && currentTransient !== null && !panelOpen
+   property bool panelOpen: false
+   property string panelOutputName: ""
+   readonly property int notificationCount: historyNotifications.length
+   property var live: ({})
++  // Sticky agent toasts brought back after a shell reload, shown as "Still waiting".
++  property var restored: ({})
++  readonly property string markerDir: Quickshell.env("XDG_RUNTIME_DIR") + "/toasty/markers"
++  // Succeeds when $1 (an .alive marker) names a running Toasty helper. Waits up to 1.5s for
++  // the marker, since the sender writes it just after Notify returns. A stale marker (sender
++  // killed outright) or a pid that isn't the helper doesn't count.
++  readonly property var aliveCheckCommand: ["sh", "-c",
++      'for i in $(seq 15); do if [ -e "$1" ]; then p=$(cat "$1" 2>/dev/null); '
++      + '[ -n "$p" ] && grep -qaE "toasty-notify|pond-agent-notify" "/proc/$p/cmdline" 2>/dev/null; exit; fi; '
++      + 'sleep 0.1; done; exit 1', "sh"]
++
++  // Away: no input for 2 minutes. Done toasts wait (keeping their time) until you're back,
++  // then one "While you were away" card sums up what happened. Needs and Failed still show.
++  IdleMonitor { id: awayMonitor; timeout: 120; respectInhibitors: true }
++  readonly property bool away: awayMonitor.isIdle || pretendAway
++  property bool pretendAway: false
++  property var awayLog: []
++  onAwayChanged: if (!away) _welcomeBack()
++  // A breath: 1s without input. A Done toast waits for one (10s at most) so it doesn't
++  // slide in mid-keystroke. Needs and Failed never wait.
++  IdleMonitor { id: breathMonitor; timeout: 1; respectInhibitors: false }
++  property string breathFor: ""
++  property real breathSince: 0
++  Timer {
++    id: breath
++    interval: 200; repeat: true
++    onTriggered: {
++      if (!breathMonitor.isIdle && Date.now() - root.breathSince < 10000) return;
++      stop();
++      const id = root.breathFor;
++      root.breathFor = "";
++      if (root.live[id] && root._findById(root.activeNotifications, id)) root._show(id, true);
++      else if (root.queue.length) advance.restart();
++    }
++  }
++
++  // `qs ipc call toasty …`: what's on screen, for toasty doctor and tests, plus test controls.
++  IpcHandler {
++    target: "toasty"
++    function status(): string {
++      return JSON.stringify({ current: root.currentTransient ? { id: root.transientId,
++          kind: root.currentTransient.kind, summary: root.currentTransient.summary,
++          stamp: root.stamps[root.transientId] || "", restored: !!root.currentTransient.restored,
++          lines: (root.currentTransient.lines || []).length } : null,
++        queue: root.queue.length, away: root.away, held: root.awayLog.length,
++        breathing: root.breathFor !== "", reducedMotion: root.reducedMotion });
++    }
++    // Press a button on the toast on screen, as if clicked (tests and keyboard tools).
++    function press(identifier: string): void {
++      if (root.currentTransient) root.invokeAction(root.currentTransient, identifier);
++    }
++    function setAway(on: bool): void { root.pretendAway = on; }
++  }
++
++  // How a toast ended, shown on it for a moment before it leaves ("Allowed", "Denied"…).
++  property var stamps: ({})
++  // When you last allowed a given command, so a repeat can say so.
++  property var allowedAt: ({})
++  // GNOME's "reduce animations" switch; other desktops can set it the same way.
++  property bool reducedMotion: false
++  Process {
++    command: ["gsettings", "get", "org.gnome.desktop.interface", "enable-animations"]
++    running: true
++    stdout: StdioCollector { onStreamFinished: root.reducedMotion = text.trim() === "false" }
++  }
++  Component {
++    id: later
++    Timer {
++      required property var fn
++      running: true
++      onTriggered: { fn(); destroy(); }
++    }
++  }
+   property bool historyWritable: false
+ 
+   SystemClock {
+@@ -75,13 +151,33 @@ Singleton {
+     bodySupported: true
+     bodyMarkupSupported: false
+     imageSupported: false
++    inlineReplySupported: true
++    // Toasty's wire (see toasty/PROTOCOL.md), sent by toasty-notify: toast kind, newline-separated
++    // suggested replies, project label, the niri window of the agent's terminal, a link to open
++    // on click (e.g. a Codex thread), and code to show in monospace (e.g. a command to approve).
++    // The x-pond-* names are the same hints from before the rename, still accepted.
++    extraHints: ["x-toasty-kind", "x-toasty-suggestions", "x-toasty-context", "x-toasty-window",
++                 "x-toasty-open", "x-toasty-code",
++                 "x-pond-kind", "x-pond-suggestions", "x-pond-context", "x-pond-window", "x-pond-open",
++                 "x-pond-code"]
+     onNotification: notification => root.receive(notification)
+   }
+ 
+   function snapshot(n, id) {
+     const saved = _findById(historyNotifications, id) || _findById(activeNotifications, id);
+-    return { id, summary: n.summary, body: n.body, appName: n.appName,
+-      appIcon: n.appIcon, desktopEntry: n.desktopEntry,
++    const raw = n.hints || {};
++    const hint = name => raw["x-toasty-" + name] || raw["x-pond-" + name] || "";
++    return { id, serverId: n.id, summary: n.summary, body: n.body, appName: n.appName,
++      appIcon: n.appIcon, desktopEntry: n.desktopEntry, urgency: n.urgency,
++      actions: (n.actions || []).map(a => ({ identifier: a.identifier, text: a.text })),
++      hasInlineReply: n.hasInlineReply, inlineReplyPlaceholder: n.inlineReplyPlaceholder,
++      kind: String(hint("kind")),
++      context: String(hint("context")),
++      windowId: String(hint("window")),
++      openUrl: String(hint("open")),
++      code: String(hint("code")),
++      suggestions: String(hint("suggestions")).split("\n").filter(s => s.trim()),
++      restored: !!restored[id],
+       timestamp: saved ? saved.timestamp : Date.now() };
+   }
+ 
+@@ -90,9 +186,133 @@ Singleton {
+     const id = Quickshell.processId + ":" + notification.id;
+     if (!live[id]) live[id] = watcher.createObject(root, { notification, notificationId: id });
+     live[id].refresh();
+-    if (!notification.lastGeneration && !panelOpen) {
+-      transientOutputName = Shell.NiriMsg.focusedOutputName || Quickshell.screens[0]?.name || "";
+-      transientId = id;
++    if (transientId === id || queue.includes(id)) return;
++    if (notification.lastGeneration) {
++      // Carried over a reload: the server still holds it, but the toast was lost with the old
++      // shell. A sticky agent toast whose sender is still listening comes back; the rest stay
++      // in history. Deferred so the saved history (and its original timestamp) is loaded first.
++      const hints = notification.hints || {};
++      const kind = String(hints["x-toasty-kind"] || hints["x-pond-kind"] || "");
++      const sticky = kind === "needs" || kind === "failed"
++          || (!kind && notification.urgency === NotificationUrgency.Critical);
++      if (sticky && agentInfo(notification))
++        aliveCheck.createObject(root, { notificationId: id, serverId: notification.id });
++      return;
++    }
++    _enqueue(id);
++  }
++
++  Component {
++    id: aliveCheck
++    Process {
++      required property string notificationId
++      required property int serverId
++      // The marker holds the sender's pid; a sender killed outright leaves it behind.
++      command: root.aliveCheckCommand.concat([root.markerDir + "/" + serverId + ".alive"])
++      running: true
++      onExited: code => {
++        const id = notificationId;
++        if (code === 0 && root.live[id] && !root.restored[id]) {
++          root.restored = Object.assign({}, root.restored, { [id]: true });
++          root.live[id].refresh();
++          if (root.transientId !== id && !root.queue.includes(id)) root._enqueue(id);
++        }
++        destroy();
++      }
++    }
++  }
++
++  function _enqueue(id) {
++    const notification = live[id].notification;
++    const urgent = notification.urgency === NotificationUrgency.Critical;
++    if (away && agentInfo(notification) && !restored[id]) {
++      awayLog = [...awayLog, id];
++      if (!urgent) return;  // it waits for the "While you were away" card
++    }
++    // The history panel lists everything except transient notifications, so those wait
++    // for the panel to close instead of being lost.
++    if (panelOpen) {
++      if (notification.transient) queue = [...queue, id];
++      return;
++    }
++    if (transientId === "" && breathFor === "" && !advance.running) {
++      _show(id);
++    } else if (urgent && breathFor !== "") {
++      // Needs you now: the Done toast waiting for a breath goes back to the head of the line.
++      breath.stop();
++      queue = [breathFor, ...queue];
++      breathFor = "";
++      _show(id);
++    } else if (urgent && transientId !== ""
++               && live[transientId]?.notification.urgency !== NotificationUrgency.Critical) {
++      // Something that needs you doesn't wait behind a routine toast: that one steps back
++      // to the head of the line and gets a fresh timer when it returns.
++      queue = [transientId, ...queue];
++      _show(id);
++    } else if (urgent) {
++      const firstNormal = queue.findIndex(q => live[q]?.notification.urgency !== NotificationUrgency.Critical);
++      const at = firstNormal < 0 ? queue.length : firstNormal;
++      queue = [...queue.slice(0, at), id, ...queue.slice(at)];
++    } else {
++      queue = [...queue, id];
++    }
++  }
++
++  function _welcomeBack() {
++    const items = awayLog.map(id => _findById(activeNotifications, id)).filter(n => n);
++    awayLog = [];
++    if (!items.length) return;
++    const rank = { needs: 0, failed: 1 };
++    items.sort((a, b) => (rank[a.kind] ?? 2) - (rank[b.kind] ?? 2) || a.timestamp - b.timestamp);
++    const id = "away:" + Date.now();
++    activeNotifications = [{ id, kind: "away", appName: "Toasty|Toasty|||", summary: "While you were away",
++      body: "", actions: [], suggestions: [], urgency: 1, timestamp: Date.now(),
++      lines: items.map(n => ({ id: n.id, name: (agentInfo(n) || {}).name || n.appName,
++                               kind: n.kind || "info", context: n.context, text: message(n),
++                               windowId: n.windowId, openUrl: n.openUrl, appName: n.appName,
++                               desktopEntry: n.desktopEntry })),
++      opened: [] }, ...activeNotifications];
++    if (transientId === "" && breathFor === "" && !advance.running) _show(id, true);
++    else queue = [id, ...queue];
++  }
++
++  // One line of the welcome-back card: open that agent, keep the card for the rest.
++  function openLine(card, line) {
++    _focus(line);
++    const fresh = _findById(activeNotifications, card.id);
++    if (!fresh) return;
++    const opened = [...fresh.opened, line.id];
++    if (fresh.lines.every(l => opened.includes(l.id))) { remove(fresh); return; }
++    activeNotifications = activeNotifications.map(n => n.id === card.id ? Object.assign({}, n, { opened }) : n);
++  }
++
++  function _show(id, calm) {
++    const n = live[id]?.notification;
++    if (!calm && n && n.urgency !== NotificationUrgency.Critical && agentInfo(n) && !breathMonitor.isIdle) {
++      breathFor = id;
++      breathSince = Date.now();
++      breath.start();
++      return;
++    }
++    transientOutputName = Shell.NiriMsg.focusedOutputName || Quickshell.screens[0]?.name || "";
++    transientId = id;
++    // Its time on screen starts now, not when it arrived.
++    live[id]?.shown();
++  }
++
++  // Let the previous toast finish leaving before the next one comes in.
++  onTransientIdChanged: if (transientId === "" && queue.length) advance.restart()
++  Timer {
++    id: advance
++    interval: 400
++    onTriggered: {
++      if (root.panelOpen || root.transientId !== "" || root.breathFor !== "") return;
++      while (root.queue.length) {
++        const [id, ...rest] = root.queue;
++        root.queue = rest;
++        const synthetic = id.startsWith("away:") && root._findById(root.activeNotifications, id);
++        if (synthetic || (root.live[id] && root._findById(root.activeNotifications, id))) { root._show(id); return; }
++      }
+     }
+   }
+ 
+@@ -116,12 +336,17 @@ Singleton {
+         popupTimeout.restart();
+       }
+       function scheduleRefresh() { Qt.callLater(refresh); }
++      function shown() { popupTimeout.restart(); }
+       Timer {
+         id: popupTimeout
+         interval: [3000, 8000, 15000][entry.notification.urgency] || 8000
+         onTriggered: {
++          // Still queued: its timer starts over when it reaches the screen.
++          if (root.transientId !== entry.notificationId) return;
++          // Agent toasts run their own pausable countdown (AgentToast.expired → hideTransient).
++          if (root.agentInfo(entry.notification)) return;
+           if (entry.notification.transient) root.remove({ id: entry.notificationId });
+-          else if (root.transientId === entry.notificationId) root.transientId = "";
++          else root.transientId = "";
+         }
+       }
+       Connections {
+@@ -130,9 +355,17 @@ Singleton {
+         function onBodyChanged() { entry.scheduleRefresh(); }
+         function onAppIconChanged() { entry.scheduleRefresh(); }
+         function onClosed(reason) {
++          const id = entry.notificationId;
+           entry.closed = true;
+-          delete root.live[entry.notificationId];
+-          root.remove({ id: entry.notificationId });
++          delete root.live[id];
++          // The sender took it down while it was on screen (answered in the session, or it
++          // stopped waiting): say so for a moment instead of vanishing. Never claim an answer.
++          if (root.transientId === id && reason === NotificationCloseReason.CloseRequested && !root.stamps[id]) {
++            root.stamp(id, "Handled in the session");
++            later.createObject(root, { fn: () => root.remove({ id }), interval: 900 });
++          } else {
++            root.remove({ id });
++          }
+           entry.destroy();
+         }
+       }
+@@ -149,6 +382,64 @@ Singleton {
+     return null;
+   }
+ 
++  // The agent registry (toasty/share/agents.json, installed to ~/.local/share/toasty):
++  // names, aliases, accent, mascot, the terminal command and title patterns of each agent.
++  // The built-in copy keeps Pond working before Toasty is installed.
++  FileView {
++    id: registryFile
++    path: (Quickshell.env("XDG_DATA_HOME") || Quickshell.env("HOME") + "/.local/share") + "/toasty/agents.json"
++    watchChanges: true
++    printErrors: false
++    onFileChanged: reload()
++  }
++  readonly property var registry: {
++    let loaded = {};
++    try { loaded = JSON.parse(registryFile.text() || "{}"); } catch (e) {}
++    const agents = {};
++    for (const k in loaded)
++      if (!k.startsWith("_") && loaded[k] && typeof loaded[k] === "object") agents[k] = loaded[k];
++    return Object.keys(agents).length ? agents : {
++      claude: { name: "Claude Code", aliases: ["claude", "claudecode", "anthropic", "comanthropicclaude"],
++                accent: "#E07A4F", mascot: "claudey.png", app: "com.anthropic.Claude",
++                title: { working: "^[\u25d0\u25d1] ", idle: "^\u2733 " } },
++      codex: { name: "Codex", aliases: ["codex", "openai", "chatgpt"], accent: "#8B5CF6", mascot: "codex.png",
++               app: "chatgpt", title: { working: "^[\u2800-\u28ff] ", waiting: "^\\[\\s*[!.]\\s*\\](\\s|$)" } }
++    };
++  }
++  function _key(value) { return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, ""); }
++  // The registry entry for a name, alias or app id; null for an unknown agent.
++  function agent(nameOrAlias) {
++    const key = _key(nameOrAlias);
++    if (!key) return null;
++    for (const id in registry) {
++      const e = registry[id];
++      if ([id, e.name, e.app, ...(e.aliases || [])].some(v => _key(v) === key)) return e;
++    }
++    return null;
++  }
++  // Which registered agent a terminal title belongs to, and what it says: working, waiting, idle.
++  function agentForTitle(title) {
++    for (const id in registry) {
++      const patterns = registry[id].title || {};
++      for (const state in patterns)
++        if (new RegExp(patterns[state]).test(title)) return { agent: registry[id], state };
++    }
++    return null;
++  }
++
++  // Explicit sender identity only: an app or helper supplies these fields.
++  function agentInfo(notification) {
++    if (!notification) return null;
++    const raw = String(notification.appName || "");
++    if (raw.startsWith("Toasty|") || raw.startsWith("PondAgent|")) {
++      const parts = raw.split("|");
++      return { name: parts[1] || "Agent", provider: parts[2] || "", model: parts[3] || "", icon: parts[4] || "" };
++    }
++    // Plain notifications from a registered agent's app (e.g. the Claude desktop app).
++    const e = agent(notification.desktopEntry) || agent(raw);
++    return e ? { name: e.name, provider: e.provider || "", model: "" } : null;
++  }
++
+   function _identity(notification) {
+     const raw = notification.desktopEntry || notification.appName || "unknown";
+     return raw.toLowerCase().replace(/[^a-z0-9]+/g, "");
+@@ -175,6 +466,17 @@ Singleton {
+ 
+   function iconSource(notification) {
+     const rawIcon = String(notification.appIcon || "");
++    const identity = _identity(notification);
++    // Service notifications often omit a desktop icon; use clear shell icons
++    // instead of the dark executable placeholder from the icon theme.
++    if (!rawIcon && identity === "pondrecording")
++      return Qt.resolvedUrl("../assets/media/recording.svg");
++    if (!rawIcon && (identity.includes("networkmanager") || identity === "orgfreedesktopnetworkmanagerapplet"))
++      return Qt.resolvedUrl("../assets/wifi.svg");
++    if (!rawIcon && identity === "notifysend")
++      return Qt.resolvedUrl("../assets/bell.svg");
++    if (!rawIcon && (identity === "comgabmsatty" || identity === "satty"))
++      return Quickshell.iconPath("satty", "application-x-executable");
+     if (rawIcon.startsWith("file:") || rawIcon.startsWith("image:")
+         || rawIcon.startsWith("qrc:"))
+       return rawIcon;
+@@ -239,17 +541,25 @@ Singleton {
+   function togglePanel(outputName) {
+     if (notificationCount === 0) return;
+     if (panelOpen && panelOutputName === outputName) { closePanel(); return; }
++    // The panel lists everything except transient notifications, so only those keep waiting.
++    queue = queue.filter(q => live[q]?.notification.transient);
+     transientId = "";
+     panelOutputName = outputName;
+     panelOpen = true;
+   }
+ 
+-  function closePanel() { panelOpen = false; }
++  function closePanel() {
++    panelOpen = false;
++    if (transientId === "" && queue.length) advance.restart();
++  }
+ 
+   function remove(notification) {
+     if (!notification || !notification.id) return;
+     const id = notification.id;
++    queue = queue.filter(q => q !== id);
+     if (transientId === id) transientId = "";
++    if (breathFor === id) { breath.stop(); breathFor = ""; }
++    awayLog = awayLog.filter(q => q !== id);
+     historyNotifications = historyNotifications.filter(n => n.id !== id);
+     activeNotifications = activeNotifications.filter(n => n.id !== id);
+     if (live[id]) live[id].notification.dismiss();
+@@ -257,20 +567,61 @@ Singleton {
+ 
+   function activate(notification) {
+     if (!notification || !notification.id) return;
+-    const n = live[notification.id]?.notification;
+-    const action = n?.actions.find(a => a.identifier === "default");
+-    if (action) action.invoke();
+-    else Shell.NiriMsg.focusApp(notification.appName, notification.desktopEntry);
++    _focus(notification);
+     remove(notification);
+     transientId = "";
+     closePanel();
+   }
+ 
++  function _focus(notification) {
++    const n = live[notification.id]?.notification;
++    const action = n?.actions.find(a => a.identifier === "default");
++    // Focus the window directly too: the sender behind the default action may be gone.
++    if (notification.windowId) Shell.NiriMsg.focusWindow(notification.windowId);
++    if (notification.openUrl) Qt.openUrlExternally(notification.openUrl);
++    else if (action) action.invoke();
++    else if (!notification.windowId) Shell.NiriMsg.focusApp(notification.appName, notification.desktopEntry);
++  }
++
++  function stamp(id, text) { stamps = Object.assign({}, stamps, { [id]: text }); }
++
++  // Hide the toast but keep the notification in history.
++  function hideTransient(notification) {
++    if (!notification || transientId !== notification.id) return;
++    // A transient one isn't kept in history, so its time running out means it's gone.
++    if (live[notification.id]?.notification.transient) remove(notification);
++    else transientId = "";
++  }
++
++  function reply(notification, text) {
++    const n = live[notification?.id]?.notification;
++    if (n && n.hasInlineReply) n.sendInlineReply(text);
++  }
++
++  // Answer at once; the toast stays a moment to show how it ended ("Allowed", "Denied").
++  function invokeAction(notification, identifier, label) {
++    const n = live[notification?.id]?.notification;
++    const action = n?.actions.find(a => a.identifier === identifier);
++    if (!action) { remove(notification); return; }
++    action.invoke();
++    if ((identifier === "allow" || identifier === "always") && notification.code)
++      allowedAt = Object.assign({}, allowedAt, { [notification.code]: Date.now() });
++    const done = { allow: "Allowed", always: "Always allowed", deny: "Denied" }[identifier] || label;
++    if (!done) { remove(notification); return; }
++    const id = notification.id;
++    stamp(id, done);
++    later.createObject(root, { fn: () => root.remove({ id }), interval: 700 });
++  }
++
+   function clearAll() {
+     for (const id of Object.keys(live))
+       live[id]?.notification.dismiss();
+     historyNotifications = [];
+     activeNotifications = [];
++    queue = [];
++    awayLog = [];
++    breath.stop();
++    breathFor = "";
+     transientId = "";
+     closePanel();
+   }
+diff --git a/notifications/ToastWindow.qml b/notifications/ToastWindow.qml
+index c86d2a5..b5861e4 100644
+--- a/notifications/ToastWindow.qml
++++ b/notifications/ToastWindow.qml
+@@ -15,32 +15,41 @@ PanelWindow {
+   readonly property string outputName: bar && bar.screen ? bar.screen.name : ""
+   readonly property bool outputMatches: Notifications.State.transientOutputName === ""
+       || Notifications.State.transientOutputName === outputName
++  // From the displayed notification, not the current one: during the exit animation the
++  // current one is already gone, and the leaving toast must keep its own look and size.
++  readonly property bool agentToast: Notifications.State.agentInfo(displayedNotification) !== null
+   readonly property bool requested: outputMatches
+       && Notifications.State.transientVisible
+-      && bar.collapseProgress > 0.42
++      && (bar.collapseProgress > 0.42 || agentToast)
+   property real reveal: requested ? 1 : 0
+   property var displayedNotification: ({})
+ 
+   screen: bar.screen
+   visible: requested || reveal > 0.001
+   color: "transparent"
+-  implicitWidth: Notifications.Style.interactiveWidth
+-  implicitHeight: toastCard.implicitHeight
++  implicitWidth: agentToast ? agentCard.implicitWidth : Notifications.Style.interactiveWidth
++  implicitHeight: agentToast ? agentCard.implicitHeight : toastCard.implicitHeight
+ 
+   anchors {
+     left: true
+     top: true
+   }
++  // The agent toast carries its own shadow padding and mascot overhang, so the window
++  // starts that much further left/up and the card itself still lines up with other toasts.
+   margins {
+     left: Math.round(Shell.Theme.sidebarOuterMargin + bar.cardWidth
+                      + Notifications.Style.desktopMargin)
+-    top: Notifications.Style.desktopMargin
++        - (agentToast ? agentCard.pad + agentCard.leftInset : 0)
++    top: agentToast ? 0 : Notifications.Style.desktopMargin
+   }
+ 
+   WlrLayershell.layer: WlrLayer.Overlay
+   WlrLayershell.namespace: "pond-notification-toast-"
+       + (outputName || "unknown")
+   WlrLayershell.exclusionMode: ExclusionMode.Ignore
++  // Take the keyboard only when clicked, and only when there's something to type or press.
++  WlrLayershell.keyboardFocus: agentToast && (agentCard.canReply || agentCard.actions.length > 0)
++      ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.None
+ 
+   Behavior on reveal { Shell.Motion { duration: Notifications.Style.panelDuration } }
+ 
+@@ -63,9 +72,25 @@ PanelWindow {
+     y: 0
+     width: Notifications.Style.interactiveWidth
+     height: implicitHeight
+-    opacity: root.reveal
++    opacity: root.agentToast ? 0 : root.reveal
++    visible: opacity > 0.001
+     notification: root.displayedNotification
+     onActivated: Notifications.State.activate(root.displayedNotification)
+     onDismissed: Notifications.State.remove(root.displayedNotification)
+   }
++  Notifications.AgentToast {
++    id: agentCard
++    // Library entrance: drop in 12px while fading.
++    y: (1 - root.reveal) * -12
++    width: implicitWidth
++    height: implicitHeight
++    opacity: root.agentToast ? root.reveal : 0
++    visible: opacity > 0.001
++    notification: root.displayedNotification
++    onActivated: Notifications.State.activate(root.displayedNotification)
++    onDismissed: Notifications.State.remove(root.displayedNotification)
++    onExpired: Notifications.State.hideTransient(root.displayedNotification)
++    onReplied: text => Notifications.State.reply(root.displayedNotification, text)
++    onActionInvoked: identifier => Notifications.State.invokeAction(root.displayedNotification, identifier)
++  }
+ }
