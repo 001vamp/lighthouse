@@ -1,5 +1,5 @@
 """Toasty tests. Run with tests/run (a private D-Bus session, fake server, fake kitty)."""
-import json, os, shutil, signal, subprocess, sys, tempfile, time, unittest
+import hashlib, json, os, shutil, signal, subprocess, sys, tempfile, time, unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.path.join(ROOT, 'bin')
@@ -217,6 +217,29 @@ class Hooks(Env):
         self.run_hook('toasty-codex-status', {**base, 'hook_event_name': 'SessionEnd'})
         self.assertNotIn('t1', self.sessions())
 
+    def test_codex_in_a_terminal_is_not_the_app(self):
+        codex = os.path.join(self.fakebin, 'codex')
+        with open(codex, 'w') as f:
+            f.write('#!/bin/sh\n"$@"\ntrue\n')
+        os.chmod(codex, 0o755)
+        payload = json.dumps({'session_id': 't', 'cwd': '/w', 'hook_event_name': 'UserPromptSubmit'})
+        subprocess.run([codex, os.path.join(BIN, 'toasty-codex-status')], input=payload, text=True, env=self.env)
+        self.assertEqual(self.sessions()['t']['app'], '')
+        self.assertNotIn('open', self.sessions()['t'])
+
+    def test_app_focus_only_silences_the_toast_for_a_lone_session(self):
+        niri = os.path.join(self.fakebin, 'niri')
+        with open(niri, 'w') as f:
+            f.write('#!/bin/sh\ncase "$*" in *focused-window*) echo \'{"app_id": "com.anthropic.Claude"}\';; esac\n')
+        env = dict(self.env, CLAUDE_CODE_DESKTOP_APP_VERSION='1')
+        stop = {'hook_event_name': 'Stop', 'session_id': 'one', 'cwd': '/w/a'}
+        self.run_hook('toasty-claude-hook', stop, env)
+        time.sleep(0.5)
+        self.assertEqual(self.calls('Notify'), [], 'looking at the only session: no toast')
+        self.run_hook('toasty-claude-hook', {**stop, 'session_id': 'two', 'hook_event_name': 'UserPromptSubmit'}, env)
+        self.run_hook('toasty-claude-hook', stop, env)
+        self.assertTrue(wait_for(lambda: self.calls('Notify')), 'another session is open: toast')
+
     def test_codex_status_skips_kitty(self):
         env = dict(self.env, KITTY_WINDOW_ID='3')
         self.run_hook('toasty-codex-status', {'session_id': 'k', 'hook_event_name': 'UserPromptSubmit'}, env)
@@ -342,6 +365,20 @@ class Install(unittest.TestCase):
         self.assertNotIn('notify', open(self.config).read())
         self.assertIn('[projects."/a"]', open(self.config).read())
         self.assertFalse(os.path.exists(os.path.join(self.home, 'bin', 'toasty-notify')))
+
+    def test_registry_updates_unless_you_edited_it(self):
+        registry = os.path.join(self.home, 'data', 'toasty', 'agents.json')
+        self.toasty('install')
+        shipped = open(registry).read()
+        open(registry, 'w').write('{"mine": {}}')
+        self.toasty('install')
+        self.assertEqual(open(registry).read(), '{"mine": {}}', 'your edit is kept')
+        self.assertEqual(open(registry + '.new').read(), shipped, 'the new version is beside it')
+        with open(registry + '.installed', 'w') as f:
+            f.write(hashlib.sha256(b'{"mine": {}}').hexdigest())
+        self.toasty('install')
+        self.assertEqual(open(registry).read(), shipped, 'not edited since Toasty wrote it: updated')
+        self.assertFalse(os.path.exists(registry + '.new'))
 
     def test_never_replaces_someone_elses_notify(self):
         open(self.config, 'w').write('notify = ["/usr/bin/other-notifier"]\n')

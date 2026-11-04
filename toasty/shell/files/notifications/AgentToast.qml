@@ -129,6 +129,7 @@ Item {
     listening = true;
     field.text = "";
     remaining = 1;
+    shownAt = Date.now();
     if (countdown.running) countdown.restart();
     const n = notification || {};
     usesMarkers = /^(Toasty|PondAgent)\|/.test(String(n.appName || "")) && !!n.serverId;
@@ -618,6 +619,17 @@ Item {
     // Paused while held, and while you're away: it waits for you instead of expiring.
     paused: running && (root.held || Notifications.State.away)
     onFinished: if (root.remaining <= 0) root.expired()
+  }
+
+  // Others are waiting their turn: a Done card gets 3s instead of the full 8s, so a burst of
+  // finishing agents doesn't take a minute to get through.
+  property real shownAt: 0
+  onVisibleChanged: if (visible) shownAt = Date.now()
+  Timer {
+    interval: 250; repeat: true
+    running: root.visible && !root.sticky && !root.sent
+    onTriggered: if (Notifications.State.queue.length && !root.held && !Notifications.State.away
+                     && !root.stamp && Date.now() - root.shownAt >= 3000) root.expired()
   }
 
   // Proof it landed: after "Sent", watch the agent's terminal title for up to 4s. If the agent

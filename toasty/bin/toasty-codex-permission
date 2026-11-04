@@ -6,18 +6,48 @@ updatedPermissions fails closed, so there is no "Always allow" button. Clicking 
 body, closing it, a timeout, or any error gives no decision, so Codex's own approval
 prompt decides. Unlike Claude, Codex waits for this hook before showing its prompt (the
 terminal just says "Running hooks"), so the toast also steps aside as soon as you look at
-the agent: no decision, and Codex's own prompt appears there.
+the agent: no decision, and Codex's own prompt appears there. The exception is the app with
+another thread active: looking at the app doesn't mean looking at this thread, so the toast stays.
 """
-import json, os, re, signal, subprocess, sys
+import json, os, re, signal, subprocess, sys, time
 
 NOTIFY = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toasty-notify')
 LOG = os.path.join(os.environ.get('XDG_STATE_HOME', os.path.expanduser('~/.local/state')),
                    'toasty', 'toasty.log')
 WAIT = 570  # stay under the 600s timeout in ~/.codex/hooks.json
+RUNTIME = os.path.join(os.environ.get('XDG_RUNTIME_DIR') or f'/tmp/toasty-{os.getuid()}', 'toasty')
+
+def other_app_sessions(session, app):
+    """Is another session of this desktop app active in the last hour? Then the app having focus
+    doesn't mean you're looking at this session, so it shouldn't silence the toast."""
+    try:
+        with open(os.path.join(RUNTIME, 'sessions.json')) as f:
+            sessions = json.load(f)
+    except (OSError, ValueError):
+        return False
+    return any(sid != session and s.get('app') == app and time.time() - s.get('time', 0) < 3600
+               for sid, s in sessions.items())
+
+def in_desktop_app():
+    """False only when a terminal Codex started us: the ChatGPT app's Codex runs as app-server."""
+    pid = os.getppid()
+    for _ in range(8):
+        try:
+            with open(f'/proc/{pid}/cmdline', 'rb') as f:
+                argv = f.read().decode('utf-8', 'replace').split('\0')
+            with open(f'/proc/{pid}/stat') as f:
+                parent = int(f.read().rpartition(')')[2].split()[1])
+        except (OSError, ValueError, IndexError):
+            return True
+        if 'codex' in (os.path.basename(a) for a in argv[:2]):
+            return 'app-server' in argv or 'exec-server' in argv
+        if parent <= 1:
+            return True
+        pid = parent
+    return True
 
 def log(msg):
     try:
-        import time
         with open(LOG, 'a') as f:
             f.write(time.strftime('%F %T ') + 'codex-permission: ' + msg + '\n')
     except OSError:
@@ -61,14 +91,16 @@ def main():
     log(f"tool={tool} session={data.get('session_id', '-')} kitty={kitty} keys={sorted(args) if isinstance(args, dict) else type(args).__name__}")
 
     cmd = [NOTIFY, '--agent', 'Codex', '--provider', 'OpenAI', '--kind', 'needs',
-           '--context', project, '--skip-if-focused', '--withdraw-if-focused', '--timeout', str(WAIT),
+           '--context', project, '--timeout', str(WAIT),
            '--action', 'allow=Allow', '--action', 'deny=Deny']
     if kitty:
-        cmd.append('--kitty')
-    else:
+        cmd += ['--kitty', '--skip-if-focused', '--withdraw-if-focused']
+    elif in_desktop_app():
         cmd += ['--desktop-entry', 'chatgpt']
         if data.get('session_id'):
             cmd += ['--open', f"codex://threads/{data['session_id']}"]
+        if not other_app_sessions(data.get('session_id'), 'chatgpt'):
+            cmd += ['--skip-if-focused', '--withdraw-if-focused']
 
     helper = subprocess.Popen(cmd + ['--code', detail or tool, title, ''], stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, text=True)

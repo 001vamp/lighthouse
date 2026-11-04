@@ -12,6 +12,24 @@ import tempfile
 import time
 
 
+def in_desktop_app():
+    """False only when a terminal Codex started us: the ChatGPT app's Codex runs as app-server."""
+    pid = os.getppid()
+    for _ in range(8):
+        try:
+            with open(f'/proc/{pid}/cmdline', 'rb') as f:
+                argv = f.read().decode('utf-8', 'replace').split('\0')
+            with open(f'/proc/{pid}/stat') as f:
+                parent = int(f.read().rpartition(')')[2].split()[1])
+        except (OSError, ValueError, IndexError):
+            return True
+        if 'codex' in (os.path.basename(a) for a in argv[:2]):
+            return 'app-server' in argv or 'exec-server' in argv
+        if parent <= 1:
+            return True
+        pid = parent
+    return True
+
 def update(data):
     sid = data.get('thread-id') or data.get('session_id')
     # Kitty sessions are skipped, like Claude's: the dock reads those from their window title.
@@ -49,8 +67,9 @@ def update(data):
                 return
             project = Path(data.get('cwd') or os.getcwd()).name or 'Codex'
             sessions[sid] = {'agent': 'Codex', 'project': project,
-                             'state': states[event], 'time': int(time.time()),
-                             'app': 'chatgpt', 'open': 'codex://threads/' + sid}
+                             'state': states[event], 'time': int(time.time()), 'app': ''}
+            if in_desktop_app():
+                sessions[sid].update(app='chatgpt', open='codex://threads/' + sid)
         temporary = None
         try:
             with tempfile.NamedTemporaryFile(mode='w', dir=runtime,

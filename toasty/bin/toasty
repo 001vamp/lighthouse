@@ -161,6 +161,24 @@ def pond_version():
     return 'mtime ' + str(max(int(os.path.getmtime(os.path.join(d, f)))
                               for d, _, fs in os.walk(POND_PACKAGED) for f in fs))
 
+def file_hash(path):
+    import hashlib
+    with open(path, 'rb') as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+def tree_hash(root):
+    """A hash of a folder's contents, so install can tell when someone has edited its overlay."""
+    import hashlib
+    h = hashlib.sha256()
+    for d, dirs, fs in os.walk(root):
+        dirs[:] = sorted(x for x in dirs if not x.startswith('.'))
+        for f in sorted(x for x in fs if not x.startswith('.')):
+            path = os.path.join(d, f)
+            h.update(os.path.relpath(path, root).encode())
+            if os.path.isfile(path):
+                h.update(file_hash(path).encode())
+    return h.hexdigest()
+
 def shell_stamp():
     """What the overlay was built from: the Pond version plus a hash of Toasty's shell files."""
     import hashlib
@@ -203,7 +221,8 @@ def install_shell():
     if os.path.lexists(POND_OVERLAY) and overlay_stamp() is None:
         return f'left alone: {POND_OVERLAY} exists and isn\'t Toasty\'s'
     stamp = shell_stamp()
-    if overlay_stamp() == stamp:
+    built = overlay_stamp()
+    if built and all(built.get(k) == v for k, v in stamp.items()):
         return f'unchanged ({POND_OVERLAY})'
     tmp = POND_OVERLAY + '.toasty-tmp'
     shutil.rmtree(tmp, ignore_errors=True)
@@ -216,12 +235,42 @@ def install_shell():
         return (f'✗ Toasty\'s changes don\'t fit this Pond ({stamp["pond"]}), so it was left as it is.\n'
                 f'  Toasts will look like plain notifications until Toasty is updated for it.\n  {r.stdout.strip()}')
     with open(os.path.join(tmp, POND_MARKER), 'w') as f:
-        json.dump(stamp, f)
+        json.dump({**stamp, 'tree': tree_hash(tmp)}, f)
+    # A rebuild replaces the whole overlay, so anything edited in it by hand is kept aside.
+    saved = ''
+    if built and built.get('tree') != tree_hash(POND_OVERLAY):
+        dest = f'{POND_OVERLAY}.toasty-backup-{time.strftime("%Y%m%d-%H%M%S")}'
+        os.replace(POND_OVERLAY, dest)
+        saved = f'\n  The old copy may have had changes of your own, so it\'s saved in {dest}'
     shutil.rmtree(POND_OVERLAY, ignore_errors=True)
     os.makedirs(os.path.dirname(POND_OVERLAY), exist_ok=True)
     os.replace(tmp, POND_OVERLAY)
-    return (f'installed into {POND_OVERLAY} (built on {stamp["pond"]}); {restart_pond()}\n'
+    return (f'installed into {POND_OVERLAY} (built on {stamp["pond"]}); {restart_pond()}{saved}\n'
             '  After a Pond update, run `toasty install` again so you get the new Pond too.')
+
+def install_registry(link):
+    """Copy agents.json in. A copy you edited is kept, with the new version saved beside it;
+    a copy still as Toasty left it is updated. The sidecar records what Toasty last wrote."""
+    registry = os.path.join(DATA, 'agents.json')
+    shipped = os.path.join(ROOT, 'share', 'agents.json')
+    sidecar, new = registry + '.installed', registry + '.new'
+    if os.path.lexists(registry) and not os.path.islink(registry) and not link:
+        try:
+            recorded = open(sidecar).read().strip()
+        except OSError:
+            recorded = ''
+        current = file_hash(registry)
+        if current != file_hash(shipped) and current != recorded:
+            shutil.copy2(shipped, new)
+            print(f'  agents.json: kept your copy at {registry}; the new version is at {new}')
+            return
+    if os.path.lexists(registry):
+        os.remove(registry)
+    (os.symlink if link else shutil.copy2)(shipped, registry)
+    if os.path.lexists(new):
+        os.remove(new)
+    with open(sidecar, 'w') as f:
+        f.write(file_hash(shipped))
 
 def install(args):
     os.makedirs(BIN, exist_ok=True)
@@ -234,13 +283,7 @@ def install(args):
         else:
             shutil.copy2(src, dest)
     os.makedirs(DATA, exist_ok=True)
-    registry = os.path.join(DATA, 'agents.json')
-    if os.path.lexists(registry) and not os.path.islink(registry) and not args.link:
-        print(f'  agents.json: kept your copy at {registry}')
-    else:
-        if os.path.lexists(registry):
-            os.remove(registry)
-        (os.symlink if args.link else shutil.copy2)(os.path.join(ROOT, 'share', 'agents.json'), registry)
+    install_registry(args.link)
     print(f'Helpers: {"linked" if args.link else "copied"} into {BIN}')
     if os.path.isdir(os.path.dirname(CLAUDE_SETTINGS)):
         print('Claude Code hooks:', patch_hooks(CLAUDE_SETTINGS, CLAUDE_HOOKS, args.migrate))
@@ -263,6 +306,9 @@ def uninstall(args):
     registry = os.path.join(DATA, 'agents.json')
     if os.path.islink(registry):
         os.remove(registry)
+    for extra in (registry + '.installed', registry + '.new'):
+        if os.path.lexists(extra):
+            os.remove(extra)
     if os.path.exists(CLAUDE_SETTINGS):
         print('Claude Code hooks:', patch_hooks(CLAUDE_SETTINGS, {}, False, remove=True))
     if os.path.exists(CODEX_HOOKS):

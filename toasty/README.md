@@ -6,7 +6,7 @@ Toasty shows a toast when an AI coding agent needs you. When an agent finishes, 
 - Allow or Deny the command it wants to run;
 - jump to the exact window or thread.
 
-A dock shows each agent's live status: Working, Waiting, Done or Failed. Everything else stays quiet: Done toasts wait while you're typing, and while you're away they wait for one "While you were away" card instead of piling up.
+A dock shows each agent's live status: Working, Waiting, Done or Failed. Everything else stays quiet: Done toasts wait up to 3 seconds while you're typing, and after 5 idle minutes they wait for one "While you were away" card instead of piling up.
 
 It works with **Claude Code** and **Codex**, in the terminal (kitty) and in their desktop apps. Other agents can be added through the [agent registry](share/agents.json).
 
@@ -38,6 +38,9 @@ toasty doctor --toast
 - **The full experience needs a Toasty-aware shell.** Without one, toasts arrive as plain notifications that still have their buttons. Agent cards, the dock, the away card and the "Sent"/"Allowed" endings come from the Quickshell client in Pond, which is the reference shell. The [protocol](PROTOCOL.md) is open, so other shells can implement it.
 - **Replies only reach agents running in kitty.** The desktop apps don't offer a way in. Their toasts open the exact thread instead.
 - **Codex:** no "Always allow" (Codex doesn't accept rule changes from hooks yet) and no Failed state (Codex sends no failure event). While a Codex permission toast is up, Codex shows nothing in its terminal. So the toast steps aside as soon as you look at Codex, and Codex's own prompt takes over.
+- **Sticky cards go first.** Only one card shows at a time, so a Done toast waits behind an unanswered Allow/Deny card. The dock shows it finished straight away.
+- **Desktop apps send their own notification too.** Toasty merges one that arrives within 3 seconds of its toast for the same agent into that card, so clicking the card uses the app's own link. Two sessions finishing at the same moment can merge the wrong pair.
+- **An app having focus can't say which session you're looking at.** A toast is only skipped for a focused app when that app has no other session active in the last hour.
 - **Terminal status is read from window titles,** so a CLI update that changes its title can break it. The patterns live in `agents.json`.
 
 ## Adding an agent

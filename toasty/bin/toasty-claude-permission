@@ -6,7 +6,7 @@ wins: answering in the terminal makes Claude stop this hook (SIGTERM), and the h
 then withdraws the toast. Clicking the toast body, closing it, or a timeout gives no
 decision, so Claude's own dialog stays the one in charge.
 """
-import json, os, re, signal, subprocess, sys
+import json, os, re, signal, subprocess, sys, time
 
 NOTIFY = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toasty-notify')
 RUNTIME = os.path.join(os.environ.get('XDG_RUNTIME_DIR') or f'/tmp/toasty-{os.getuid()}', 'toasty')
@@ -37,6 +37,17 @@ def describe(tool, args, cwd):
         return f'Use {server} › {name}?', one_line(json.dumps(args, ensure_ascii=False))
     return f'Use {tool}?', one_line(json.dumps(args, ensure_ascii=False))
 
+def other_app_sessions(session, app):
+    """Is another session of this desktop app active in the last hour? Then the app having focus
+    doesn't mean you're looking at this session, so it shouldn't silence the toast."""
+    try:
+        with open(os.path.join(RUNTIME, 'sessions.json')) as f:
+            sessions = json.load(f)
+    except (OSError, ValueError):
+        return False
+    return any(sid != session and s.get('app') == app and time.time() - s.get('time', 0) < 3600
+               for sid, s in sessions.items())
+
 def decide(behavior, **extra):
     print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PermissionRequest',
                                              'decision': {'behavior': behavior, **extra}}}))
@@ -54,7 +65,7 @@ def main():
     title, detail = describe(tool, args, cwd)
 
     cmd = [NOTIFY, '--agent', 'Claude Code', '--provider', 'Anthropic', '--kind', 'needs',
-           '--context', project, '--skip-if-focused', '--timeout', str(WAIT),
+           '--context', project, '--timeout', str(WAIT),
            '--action', 'allow=Allow', '--action', 'deny=Deny']
     caption = ''
     if suggestions:
@@ -63,9 +74,13 @@ def main():
         covered = [r.get('ruleContent') or r.get('toolName', '') for s in suggestions for r in s.get('rules', [])]
         caption = f"Always allow covers: {', '.join(covered)}"
     if os.environ.get('KITTY_WINDOW_ID'):
-        cmd.append('--kitty')
+        cmd += ['--kitty', '--skip-if-focused']
     elif os.environ.get('CLAUDE_CODE_DESKTOP_APP_VERSION'):
         cmd += ['--desktop-entry', 'com.anthropic.Claude']
+        if not other_app_sessions(data.get('session_id'), 'com.anthropic.Claude'):
+            cmd.append('--skip-if-focused')
+    else:
+        cmd.append('--skip-if-focused')
 
     # While this toast is up, the Notification hook skips its own "needs permission" toast.
     marker = os.path.join(RUNTIME, f"claude-perm-{data.get('session_id', 'none')}")

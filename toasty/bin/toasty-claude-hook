@@ -118,12 +118,27 @@ def set_session(data, project, state, only_from=None):
             json.dump(sessions, f)
         os.replace(tmp, SESSIONS)
 
-def notify(*args):
-    cmd = [NOTIFY, '--agent', 'Claude Code', '--provider', 'Anthropic', '--detach', '--skip-if-focused']
+def other_app_sessions(session, app):
+    """Is another session of this desktop app active in the last hour? Then the app having focus
+    doesn't mean you're looking at this session, so it shouldn't silence the toast."""
+    try:
+        with open(os.path.join(RUNTIME, 'sessions.json')) as f:
+            sessions = json.load(f)
+    except (OSError, ValueError):
+        return False
+    return any(sid != session and s.get('app') == app and time.time() - s.get('time', 0) < 3600
+               for sid, s in sessions.items())
+
+def notify(data, *args):
+    cmd = [NOTIFY, '--agent', 'Claude Code', '--provider', 'Anthropic', '--detach']
     if os.environ.get('KITTY_WINDOW_ID'):
-        cmd.append('--kitty')
+        cmd += ['--kitty', '--skip-if-focused']
     elif os.environ.get('CLAUDE_CODE_DESKTOP_APP_VERSION'):
         cmd += ['--desktop-entry', 'com.anthropic.Claude']
+        if not other_app_sessions(data.get('session_id'), 'com.anthropic.Claude'):
+            cmd.append('--skip-if-focused')
+    else:
+        cmd.append('--skip-if-focused')
     subprocess.run(cmd + list(args), stdin=subprocess.DEVNULL, timeout=10)
 
 def main():
@@ -153,7 +168,7 @@ def main():
         error = data.get('last_assistant_message') or data.get('error_details') or 'The turn failed.'
         error = re.sub(r'^API Error:\s*', '', error).strip()
         mark_failed(error)
-        notify('--kind', 'failed', '--context', project,
+        notify(data, '--kind', 'failed', '--context', project,
                *(['--reply', '--suggest', 'continue'] if can_reply else []),
                f"Couldn't finish in {project}", error)
     elif event == 'Stop':
@@ -161,7 +176,7 @@ def main():
         if data.get('stop_hook_active'):
             return
         message = last_assistant_text(data.get('transcript_path', '')) or 'Finished its turn.'
-        notify('--kind', 'done', '--context', project, *(['--reply'] if can_reply else []), f'Done in {project}', message)
+        notify(data, '--kind', 'done', '--context', project, *(['--reply'] if can_reply else []), f'Done in {project}', message)
         open(stamp, 'w').close()
     elif event == 'Notification':
         message = data.get('message', '')
@@ -169,14 +184,14 @@ def main():
             # toasty-claude-permission already put up an Allow/Deny toast for this prompt.
             if os.path.exists(os.path.join(RUNTIME, f"claude-perm-{data.get('session_id', 'none')}")):
                 return
-            notify('--kind', 'needs', '--context', project, 'Needs your permission', message)
+            notify(data, '--kind', 'needs', '--context', project, 'Needs your permission', message)
         else:
             try:
                 if time.time() - os.path.getmtime(stamp) < 600:
                     return
             except OSError:
                 pass
-            notify('--kind', 'needs', '--context', project, *(['--reply'] if can_reply else []),
+            notify(data, '--kind', 'needs', '--context', project, *(['--reply'] if can_reply else []),
                    f'Waiting in {project}', message or 'Claude is waiting for your input.')
 
 try:

@@ -12,4 +12,6 @@ The Quickshell side of Toasty: agent toasts, the dock row, the away card, and th
 
 Install and uninstall restart Pond for you. They stop the running Pond by its instance id, because `qs kill -c pond-shell` would look for the copy that was just added or removed, not the one that's running.
 
-The patch is made against Pond's `main` branch. Pond is under BSD 3-Clause, © Butterfly Interaction Inc. ([LICENSE-pond](LICENSE-pond)).
+A rebuild replaces that copy; if it was edited by hand, the old one is kept beside it as `pond-shell.toasty-backup-<time>`.
+
+The patch is made against `pond-shell-omarchy` 0.1.11. A Pond checkout with Toasty in it doesn't get changes to this patch automatically; apply them there too. Pond is under BSD 3-Clause, © Butterfly Interaction Inc. ([LICENSE-pond](LICENSE-pond)).
