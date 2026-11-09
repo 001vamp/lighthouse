@@ -41,6 +41,7 @@ toasty doctor --toast
 - **Sticky cards go first.** Only one card shows at a time, so a Done toast waits behind an unanswered Allow/Deny card. The dock shows it finished straight away.
 - **Desktop apps send their own notification too.** Toasty merges one that arrives within 3 seconds of its toast for the same agent into that card, so clicking the card uses the app's own link. Two sessions finishing at the same moment can merge the wrong pair.
 - **An app having focus can't say which session you're looking at.** A toast is only skipped for a focused app when that app has no other session active in the last hour.
+- **Codex turns the app runs out of sight** (like ChatGPT's suggestions) are left out: they have no saved thread to show or open.
 - **Terminal status is read from window titles,** so a CLI update that changes its title can break it. The patterns live in `agents.json`.
 
 ## Adding an agent

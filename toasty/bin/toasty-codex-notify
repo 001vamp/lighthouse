@@ -5,7 +5,7 @@ In kitty the toast takes replies and typing goes back to that window. Anywhere e
 (the ChatGPT/Codex desktop app) it's read-only, and clicking opens the exact thread.
 Every run is logged, so we can tell which Codex frontends actually call this.
 """
-import json, os, re, subprocess, sys, time
+import glob, json, os, re, subprocess, sys, time
 
 NOTIFY = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toasty-notify')
 LOG = os.path.join(os.environ.get('XDG_STATE_HOME', os.path.expanduser('~/.local/state')),
@@ -42,6 +42,13 @@ def in_desktop_app():
         pid = parent
     return True
 
+def saved_thread(thread):
+    """Does Codex keep this thread? Turns the app runs out of sight (e.g. ChatGPT's suggestions)
+    leave no rollout, and their thread can't be opened, so they get no toast."""
+    home = os.environ.get('CODEX_HOME') or os.path.expanduser('~/.codex')
+    return any(glob.glob(os.path.join(home, folder, '**', f'rollout-*-{glob.escape(thread)}.jsonl'), recursive=True)
+               for folder in ('sessions', 'archived_sessions'))
+
 def log(msg):
     try:
         os.makedirs(os.path.dirname(LOG), exist_ok=True)
@@ -55,7 +62,9 @@ try:
     in_kitty = bool(os.environ.get('KITTY_WINDOW_ID') and os.environ.get('KITTY_LISTEN_ON'))
     thread = str(payload.get('thread-id') or '')
     log(f"type={payload.get('type')} thread={thread or '-'} kitty={in_kitty} parent={os.getppid()}")
-    if payload.get('type') == 'agent-turn-complete':
+    if payload.get('type') == 'agent-turn-complete' and thread and not saved_thread(thread):
+        log(f'skipped: {thread} is not a saved thread')
+    elif payload.get('type') == 'agent-turn-complete':
         subprocess.run([os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toasty-codex-status')],
                        input=json.dumps(payload), text=True, timeout=3)
         project = os.path.basename(payload.get('cwd') or os.getcwd()) or 'Codex'

@@ -35,6 +35,10 @@ def update(data):
     # Kitty sessions are skipped, like Claude's: the dock reads those from their window title.
     if not isinstance(sid, str) or not sid or os.environ.get('KITTY_WINDOW_ID'):
         return
+    # A turn with no transcript is one the app runs out of sight (e.g. ChatGPT's suggestions):
+    # there's no thread to show or open.
+    if 'transcript_path' in data and not data['transcript_path']:
+        return
     event = data.get('hook_event_name') or data.get('type')
     states = {'UserPromptSubmit': 'working', 'PermissionRequest': 'waiting',
               'PostToolUse': 'working', 'Stop': 'done',

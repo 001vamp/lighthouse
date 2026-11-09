@@ -217,6 +217,24 @@ class Hooks(Env):
         self.run_hook('toasty-codex-status', {**base, 'hook_event_name': 'SessionEnd'})
         self.assertNotIn('t1', self.sessions())
 
+    def test_codex_hidden_turns_are_ignored(self):
+        self.run_hook('toasty-codex-status', {'session_id': 'h', 'cwd': '/w', 'transcript_path': None,
+                                              'hook_event_name': 'UserPromptSubmit'})
+        self.assertNotIn('h', self.sessions(), 'no transcript: not a thread you can open')
+        notify = os.path.join(BIN, 'toasty-codex-notify')
+        done = lambda thread: json.dumps({'type': 'agent-turn-complete', 'thread-id': thread, 'cwd': '/w',
+                                          'last-assistant-message': 'ok'})
+        subprocess.run([notify, done('hidden')], env=self.env, timeout=15)
+        time.sleep(0.5)
+        self.assertEqual(self.calls('Notify'), [], 'no rollout: no toast')
+        self.assertNotIn('hidden', self.sessions())
+        day = os.path.join(self.tmp, '.codex', 'sessions', '2026', '11', '09')
+        os.makedirs(day)
+        open(os.path.join(day, 'rollout-2026-11-09T09-44-20-saved.jsonl'), 'w').close()
+        subprocess.run([notify, done('saved')], env=self.env, timeout=15)
+        self.assertTrue(wait_for(lambda: self.calls('Notify')), 'a saved thread still toasts')
+        self.assertEqual(self.sessions()['saved']['state'], 'done')
+
     def test_codex_in_a_terminal_is_not_the_app(self):
         codex = os.path.join(self.fakebin, 'codex')
         with open(codex, 'w') as f:
