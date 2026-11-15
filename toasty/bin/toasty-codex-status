@@ -6,10 +6,15 @@ No stdout: status reporting must never affect permissions or continue a turn.
 import fcntl
 import json
 import os
+import re
 from pathlib import Path
 import sys
 import tempfile
 import time
+import uuid
+
+if os.environ.get('TOASTY_OWNED') == '1':
+    sys.exit(0)  # toastyd started this session and reports it itself
 
 
 def update(data):
@@ -18,10 +23,16 @@ def update(data):
     if not isinstance(sid, str) or not sid or os.environ.get('KITTY_WINDOW_ID'):
         return
     event = data.get('hook_event_name') or data.get('type')
-    states = {'UserPromptSubmit': 'working', 'PermissionRequest': 'waiting',
+    states = {'SessionStart': 'ready', 'UserPromptSubmit': 'working', 'PermissionRequest': 'waiting',
               'PostToolUse': 'working', 'Stop': 'done',
               'agent-turn-complete': 'done', 'StopFailure': 'failed'}
-    ended = event in ('SessionEnd', 'Interrupt')
+    if event == 'StopFailure':
+        detail = data.get('error_details') or data.get('last-assistant-message') or data.get('message') or ''
+        if re.search(r'(?:usage|rate)[ -]?limit|(?:hit|reached|exceeded).{0,50}limit|limit.{0,50}(?:reached|exceeded)|quota', str(detail), re.I):
+            states[event] = 'paused'
+    if event == 'Interrupt':
+        states[event] = 'paused'
+    ended = event == 'SessionEnd'
     if not ended and event not in states:
         return
     runtime = os.environ.get('XDG_RUNTIME_DIR')
@@ -43,14 +54,22 @@ def update(data):
                 return
             del sessions[sid]
         else:
-            # Tool completions only resume a waiting session. They must not
-            # resurrect an interrupted session or overwrite a finished turn.
-            if event == 'PostToolUse' and sessions.get(sid, {}).get('state') != 'waiting':
+            # Tool completions refresh active sessions without resurrecting paused
+            # sessions or overwriting a finished turn.
+            if event == 'PostToolUse' and sessions.get(sid, {}).get('state') not in ('waiting', 'working'):
                 return
+            previous = sessions.get(sid, {})
             project = Path(data.get('cwd') or os.getcwd()).name or 'Codex'
-            sessions[sid] = {'agent': 'Codex', 'project': project,
-                             'state': states[event], 'time': int(time.time()),
+            sessions[sid] = {**previous, 'agent': 'Codex', 'project': project,
+                             'state': states[event], 'revision': uuid.uuid4().hex, 'time': int(time.time()),
                              'app': 'chatgpt', 'open': 'codex://threads/' + sid}
+            if event == 'UserPromptSubmit' and (not previous.get('task') or previous.get('task', '').strip().lower() in ('hi', 'hello', 'ok', 'yes', 'continue', 'do tht', 'do that', 'do it')):
+                sessions[sid]['task'] = data.get('prompt') if isinstance(data.get('prompt'), str) else ''
+            elif event == 'SessionStart' and previous:
+                sessions[sid]['state'] = previous.get('state', 'ready')
+            sessions[sid]['reason'] = ('Interrupted' if event == 'Interrupt' else
+                'Usage limit reached' if states[event] == 'paused' else
+                'Could not finish; open the session for details' if states[event] == 'failed' else '')
         temporary = None
         try:
             with tempfile.NamedTemporaryFile(mode='w', dir=runtime,

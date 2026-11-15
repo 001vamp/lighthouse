@@ -13,7 +13,10 @@ Notification:  permission prompts → sticky "Needs your permission" (click open
                idle prompts → sticky reply toast, unless a Stop toast went out in the last 10 min.
 Never blocks Claude: toasty-notify is started detached and this always exits 0.
 """
-import json, os, re, subprocess, sys, time
+import json, os, re, subprocess, sys, time, uuid
+
+if os.environ.get('TOASTY_OWNED') == '1':
+    sys.exit(0)  # toastyd started this session and reports it itself
 
 NOTIFY = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toasty-notify')
 RUNTIME = os.path.join(os.environ.get('XDG_RUNTIME_DIR') or f'/tmp/toasty-{os.getuid()}', 'toasty')
@@ -36,9 +39,9 @@ def last_assistant_text(path):
             continue
         parts = [c.get('text', '') for c in entry.get('message', {}).get('content', [])
                  if isinstance(c, dict) and c.get('type') == 'text']
-        text = re.sub(r'\s+', ' ', ' '.join(parts)).strip()
+        text = '\n\n'.join(parts).strip()
         if text:
-            return text[:220] + ('…' if len(text) > 220 else '')
+            return text[:16000] + ('\n\nPreview limit reached. Open session for the full reply.' if len(text) > 16000 else '')
     return ''
 
 def niri_window():
@@ -77,7 +80,7 @@ def mark_failed(error):
     win = niri_window()
     key = f'win:{win}' if win is not None else pid
     if error:
-        state[key] = {'error': error[:120], 'time': int(time.time())}
+        state[key] = {'error': error[:120], 'state': 'paused' if usage_limited(error) else 'failed', 'time': int(time.time())}
     elif key in state:
         del state[key]
     else:
@@ -104,19 +107,32 @@ def set_session(data, project, state, only_from=None):
         except (OSError, ValueError):
             sessions = {}
         current = sessions.get(sid, {}).get('state')
-        if (only_from and current not in only_from) or (state and current == state) \
+        if (only_from and current not in only_from) \
                 or (state is None and sid not in sessions):
             return
         if state is None:
             del sessions[sid]
         else:
-            sessions[sid] = {'agent': 'Claude Code', 'project': project, 'state': state,
+            previous = sessions.get(sid, {})
+            sessions[sid] = {**previous, 'agent': 'Claude Code', 'project': project, 'state': state, 'revision': uuid.uuid4().hex,
                              'time': int(time.time()),
                              'app': 'com.anthropic.Claude' if os.environ.get('CLAUDE_CODE_DESKTOP_APP_VERSION') else ''}
+        if state is not None:
+            event = data.get('hook_event_name')
+            if event == 'UserPromptSubmit' and (not previous.get('task') or previous.get('task', '').strip().lower() in ('hi', 'hello', 'ok', 'yes', 'continue', 'do tht', 'do that', 'do it')):
+                sessions[sid]['task'] = data.get('prompt') if isinstance(data.get('prompt'), str) else ''
+            if event == 'SessionStart' and current:
+                sessions[sid]['state'] = current
+            detail = data.get('error_details') or data.get('last_assistant_message') or data.get('message') or ''
+            sessions[sid]['reason'] = ('Usage limit reached' if state == 'paused' and usage_limited(detail) else
+                'Interrupted' if event == 'Interrupt' else
+                'Could not finish; open the session for details' if state == 'failed' else '')
         tmp = f'{SESSIONS}.{os.getpid()}'
         with open(tmp, 'w') as f:
             json.dump(sessions, f)
         os.replace(tmp, SESSIONS)
+
+active_session = ""
 
 def notify(*args):
     cmd = [NOTIFY, '--agent', 'Claude Code', '--provider', 'Anthropic', '--detach', '--skip-if-focused']
@@ -124,20 +140,36 @@ def notify(*args):
         cmd.append('--kitty')
     elif os.environ.get('CLAUDE_CODE_DESKTOP_APP_VERSION'):
         cmd += ['--desktop-entry', 'com.anthropic.Claude']
+    if active_session:
+        cmd += ['--session', active_session]
+        if '--kind' in args and args[args.index('--kind') + 1] == 'paused' and usage_limited(args[-1]):
+            cmd += ['--reason', 'Usage limit reached']
+        if '--kind' in args and args[args.index('--kind') + 1] == 'done':
+            cmd += ['--event', 'completion']
     subprocess.run(cmd + list(args), stdin=subprocess.DEVNULL, timeout=10)
 
+def usage_limited(message):
+    return bool(re.search(r"(?:usage|rate)[ -]?limit|(?:hit|reached|exceeded).{0,50}limit|limit.{0,50}(?:reached|exceeded)|quota", str(message or ''), re.I))
+
 def main():
+    global active_session
     data = json.load(sys.stdin)
+    active_session = str(data.get("session_id") or "")
     event = data.get('hook_event_name', '')
     project = os.path.basename(data.get('cwd') or os.getcwd()) or 'Claude Code'
     stamp = os.path.join(RUNTIME, f"claude-stop-{data.get('session_id', 'none')}")
     can_reply = bool(os.environ.get('KITTY_WINDOW_ID'))
 
     # Status only (these run async and never toast).
-    if event == 'UserPromptSubmit':
+    if event == 'SessionStart':
+        return set_session(data, project, 'ready')
+    if event == 'Interrupt':
+        return set_session(data, project, 'paused')
+    if event == 'UserPromptSubmit' and (not previous.get('task') or previous.get('task', '').strip().lower() in ('hi', 'hello', 'ok', 'yes', 'continue', 'do tht', 'do that', 'do it')):
+        mark_failed(None)
         return set_session(data, project, 'working')
     if event == 'PostToolUse':  # a tool ran, so any permission prompt was answered
-        return set_session(data, project, 'working', only_from=('waiting',))
+        return set_session(data, project, 'working', only_from=('waiting', 'working'))
     if event == 'PermissionRequest':
         return set_session(data, project, 'waiting')
     if event == 'SessionEnd':
@@ -145,17 +177,21 @@ def main():
     if event == 'Stop':
         set_session(data, project, 'done')
     elif event == 'StopFailure':
-        set_session(data, project, 'failed')
+        detail = data.get('last_assistant_message') or data.get('error_details') or ''
+        set_session(data, project, 'paused' if usage_limited(detail) else 'failed')
+    elif event == 'Notification' and usage_limited(data.get('message', '')):
+        set_session(data, project, 'paused')
     elif event == 'Notification' and 'permission' in data.get('message', '').lower():
         set_session(data, project, 'waiting')
 
     if event == 'StopFailure':
         error = data.get('last_assistant_message') or data.get('error_details') or 'The turn failed.'
         error = re.sub(r'^API Error:\s*', '', error).strip()
+        limited = usage_limited(error)
         mark_failed(error)
-        notify('--kind', 'failed', '--context', project,
+        notify('--kind', 'paused' if limited else 'failed', '--context', project,
                *(['--reply', '--suggest', 'continue'] if can_reply else []),
-               f"Couldn't finish in {project}", error)
+               (f"Paused in {project}" if limited else f"Couldn't finish in {project}"), error)
     elif event == 'Stop':
         mark_failed(None)
         if data.get('stop_hook_active'):
@@ -165,7 +201,10 @@ def main():
         open(stamp, 'w').close()
     elif event == 'Notification':
         message = data.get('message', '')
-        if 'permission' in message.lower():
+        if usage_limited(message):
+            mark_failed(message)
+            notify('--kind', 'paused', '--context', project, f'Paused in {project}', message)
+        elif 'permission' in message.lower():
             # toasty-claude-permission already put up an Allow/Deny toast for this prompt.
             if os.path.exists(os.path.join(RUNTIME, f"claude-perm-{data.get('session_id', 'none')}")):
                 return

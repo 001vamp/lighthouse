@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 import Quickshell
 import Quickshell.Io
 import ".." as Shell
@@ -12,13 +13,14 @@ import "../notifications" as Notifications
 //
 // Done: always shows for `doneGrace` with the library's pop (pill pops, turns blue, green
 // check springs in), even if you were looking. After that it stays Done until you've seen
-// it; then a terminal row settles to Idle and an app-session row fades out.
+// it; then a terminal row settles to Idle. App rows clear only when individually opened or dismissed.
 Shell.Card {
   id: root
+  color: "#29272D"
   property real collapseProgress: 0
   readonly property real widthProgress: Shell.Theme.collapseWidth(collapseProgress)
   readonly property real heightProgress: Shell.Theme.collapseHeight(collapseProgress)
-  readonly property int rowHeight: Math.round(Shell.Theme.lerp(44, 40, heightProgress))
+  readonly property int rowHeight: Math.round(Shell.Theme.lerp(58, 40, heightProgress))
   readonly property int doneGrace: 6000
   readonly property int leaveDuration: 400
 
@@ -39,6 +41,18 @@ Shell.Card {
   // their hooks: {"<session>": {"agent", "project", "state", "time", "app", "open"?}}.
   // "open" is a link back to the exact thread, e.g. codex://threads/<id>.
   readonly property string sessionsPath: Quickshell.env("XDG_RUNTIME_DIR") + "/toasty/sessions.json"
+  property var conversationTitles: ({})
+  Process {
+    id: titleReader
+    command: ["toasty-titles"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        try { root.conversationTitles = JSON.parse(text); root.refresh(); }
+        catch (e) { /* Preserve the previous labels during an unreadable update. */ }
+      }
+    }
+  }
+  Timer { interval: 30000; repeat: true; running: true; triggeredOnStart: true; onTriggered: titleReader.running = true }
   property var sessions: ({})
   FileView {
     id: sessionFile
@@ -46,7 +60,7 @@ Shell.Card {
     watchChanges: true
     printErrors: false
     onFileChanged: reload()
-    onLoaded: { try { root.sessions = JSON.parse(text() || "{}"); } catch (e) { root.sessions = {}; } }
+    onLoaded: { try { root.sessions = JSON.parse(text() || "{}"); titleReader.running = true; } catch (e) { root.sessions = {}; } }
   }
   // The files have to exist to be watched.
   Process {
@@ -56,22 +70,20 @@ Shell.Card {
     onExited: { failures.reload(); sessionFile.reload(); }
   }
 
-  // An app session counts as seen once you've looked at that app since it finished.
-  // Lowercased: hooks write "chatgpt" while niri reports "Chatgpt".
-  readonly property string focusedApp: ((Object.values(Shell.NiriMsg._windows).find(w => w.isFocused) || {}).appId || "").toLowerCase()
-  property var seenAt: ({})
-  onFocusedAppChanged: if (focusedApp) { const s = Object.assign({}, seenAt); s[focusedApp] = Date.now(); seenAt = s; }
-
   // Terminal rows: when a title stops showing work, remember when (window id → ms).
   property var lastRaw: ({})
   // The agent each window last showed itself to be, so an idle title keeps its name and mascot.
   property var knownAgent: ({})
   property var doneAt: ({})
-  // Ticks only while something is mid-grace or fading out.
+  property var settlingAt: ({})
+  // Re-evaluate hook freshness even when no new hook or window event arrives.
+  readonly property int statusFreshness: 10 * 60 * 1000
+  Timer { interval: 30000; repeat: true; running: true; onTriggered: root.refresh() }
+  // Ticks while something is mid-grace or fading out.
   property bool ticking: false
   Timer { interval: 250; repeat: true; running: root.ticking; onTriggered: root.refresh() }
 
-  readonly property var inputs: [Shell.NiriMsg._windows, failed, sessions, focusedApp, seenAt, agentPids]
+  readonly property var inputs: [Shell.NiriMsg._windows, failed, sessions, agentPids]
   onInputsChanged: Qt.callLater(refresh)
   Component.onCompleted: refresh()
 
@@ -120,9 +132,42 @@ Shell.Card {
 
   ListModel { id: rows }
 
+  // Titles and prompts are untrusted display text, never a command preview.
+  function readable(value) {
+    if (typeof value !== "string") return "";
+    const text = value.replace(/\s+/g, " ").trim();
+    if (!text || text.length > 240 || /[<>`{}|;$\\]|(?:^|\s)(?:--?\w|\/|~\/)|[a-f0-9]{16,}|[a-f0-9]{8}-[a-f0-9]{4}-/i.test(text)
+        || /^(?:cd|env|exec|sudo|bash|sh|fish|python\d*|node|npm|npx|cargo|git|rg|ls|cat|codex|claude)(?:\s|$)/i.test(text)) return "";
+    return text;
+  }
+  function context(value) {
+    const text = readable(value);
+    return /^(?:tmp|temp|scratch|worktree|new-chat|[a-f0-9]{6,})(?:[-_.\d].*)?$/i.test(text) ? "" : text;
+  }
+  // Keep source text in the tooltip; the narrow row gets a bounded excerpt.
+  function shortTitle(value, fallback, nativeTitle) {
+    const text = nativeTitle ? String(value || "").replace(/\s+/g, " ").trim().slice(0, 240) : readable(value);
+    if (!text || /^(?:do (?:that|tht|it)|ok(?:ay)?|yes|no|continue|go ahead|thanks|hello|hi)[.!? ]*$/i.test(text)) return fallback;
+    const sentence = text.split(/[\n.!?]/)[0].trim() || text;
+    const words = sentence.split(/\s+/);
+    let title = words.slice(0, 7).join(" ");
+    if (title.length > 48) title = title.slice(0, 48).replace(/\s+\S*$/, "");
+    return title + (title.length < sentence.length ? "…" : "");
+  }
+  function explanation(state, reason, terminal) {
+    if (reason) return reason;
+    return state === "ready" ? "Session opened · ready for a task"
+        : state === "working" ? "In progress · no action needed"
+        : state === "waiting" ? "Needs your attention · open session"
+        : state === "done" ? (terminal ? "Activity ended · check session" : "Turn finished · ready to review")
+        : state === "paused" ? "Paused · open session to continue"
+        : state === "failed" ? "Could not finish · open for details"
+        : state === "unknown" ? "No recent update · check session"
+        : "Ready · no activity reported";
+  }
+
   function refresh() {
     const now = Date.now();
-    const order = { waiting: 0, failed: 1, done: 2, working: 3, idle: 4 };
     const list = [];
     let ticking = false;
     const raw = {};
@@ -136,24 +181,30 @@ Shell.Card {
       const shared = Object.values(windows).filter(o => o.pid === w.pid).length > 1;
       const running = shared ? null : root.agentPids[w.pid];
       if (!match && !running) { delete root.knownAgent[w.id]; continue; }
-      const busy = Shell.NiriMsg._needsAttention(title) ? "waiting"
+      let busy = Shell.NiriMsg._needsAttention(title) ? "waiting"
           : Shell.NiriMsg._isWorking(title) ? "working" : "";
+      // A brief blank title between tools must not flash Done.
+      if (!busy && root.lastRaw[w.id] === "working") {
+        if (!root.settlingAt[w.id]) root.settlingAt[w.id] = now;
+        if (now - root.settlingAt[w.id] < 1000) { busy = "working"; ticking = true; }
+        else delete root.settlingAt[w.id];
+      } else if (busy) delete root.settlingAt[w.id];
       raw[w.id] = busy;
       if (root.lastRaw[w.id] === "working" && busy === "") root.doneAt[w.id] = now;
       const inGrace = now - (root.doneAt[w.id] || 0) < root.doneGrace;
       if (inGrace) ticking = true;
       // Failures are keyed by niri window; older entries (and lookups that failed) by kitty pid.
       const failure = root.failed["win:" + w.id] || root.failed[w.pid];
-      const state = busy || (failure ? "failed"
-          : Shell.NiriMsg._unread[w.id] || inGrace ? "done" : "idle");
+      const state = failure ? (failure.state || "failed") : busy || ((root.doneAt[w.id] && Shell.NiriMsg._unread[w.id]) || inGrace ? "done" : "idle");
       if (match) root.knownAgent[w.id] = match.agent;
       const agent = root.knownAgent[w.id] || running;
       list.push({
-        key: "win:" + w.id, winId: w.id, app: "", link: "", state, leaving: false,
+        key: "win:" + w.id, reportJson: "", winId: w.id, app: "", link: "", state, leaving: false,
         name: agent ? agent.name : "Agent",
         icon: agent ? agent.mascot || "ghost.png" : "ghost.png",
-        task: state === "failed" ? failure.error || "Couldn’t finish"
-            : title.replace(/^(\[\s*[!.]\s*\]|[⠀-⣿◐◑✳])\s*/, "") || "Terminal"
+        task: shortTitle(match ? context(title.replace(/^(\[\s*[!.]\s*\]|[⠀-⣿◐◑✳])\s*/, "")) : "", (agent ? agent.name : "Agent") + " session"),
+        fullTask: title,
+        detail: explanation(state, failure ? (failure.state === "paused" ? "Usage limit reached · open session" : "Could not finish · open for details") : "", true)
       });
     }
     root.lastRaw = raw;
@@ -162,26 +213,27 @@ Shell.Card {
       const s = root.sessions[sid];
       const at = (s.time || 0) * 1000;
       let state = s.state, leaving = false;
-      if (now - at > 12 * 3600 * 1000) continue;  // stale
-      if (state === "done") {
-        const app = (s.app || "").toLowerCase();
-        const seen = root.focusedApp === app ? at : (root.seenAt[app] || 0) > at ? root.seenAt[app] : 0;
-        if (seen) {
-          const leaveAt = Math.max(seen, at + root.doneGrace);
-          if (now >= leaveAt + root.leaveDuration) continue;
-          leaving = now >= leaveAt;
-          ticking = true;
-        }
-      } else if (state !== "working" && state !== "waiting" && state !== "failed") {
-        continue;  // idle app sessions aren't worth a row
-      }
+      if ((state === "working" || state === "waiting" || state === "ready") && now - at > root.statusFreshness) state = "unknown";
+      if (!["ready", "done", "working", "waiting", "paused", "failed", "unknown"].includes(state)) continue;
       const agent = Notifications.State.agent(s.agent) || {};
       const name = agent.name || s.agent || "Agent";
-      list.push({ key: "session:" + sid, winId: -1, app: s.app || "", link: s.open || "",
+      list.push({ key: "session:" + sid, reportJson: JSON.stringify(s), winId: -1, app: s.app || "", link: s.open || "",
                   state, leaving, name, icon: agent.mascot || "ghost.png",
-                  task: s.project || name + " app" });
+                  task: shortTitle(root.conversationTitles[sid] || s.task, name + (context(s.project) ? " · " + context(s.project) : " session"), !!root.conversationTitles[sid]),
+                  fullTask: (root.conversationTitles[sid] || readable(s.task) || "") + (context(s.project) ? "\nProject: " + context(s.project) : ""),
+                  detail: explanation(state, state === "unknown" ? "" : readable(s.reason), false) });
     }
-    list.sort((a, b) => order[a.state] - order[b.state] || a.key.localeCompare(b.key));
+    // Distinguish legacy sessions that supplied no task without exposing IDs.
+    const totals = {}, seen = {};
+    for (const item of list) totals[item.task] = (totals[item.task] || 0) + 1;
+    for (const item of list) {
+      const title = item.task;
+      if (totals[title] > 1) item.task += " · " + (seen[title] = (seen[title] || 0) + 1);
+    }
+    // Retain insertion order across status changes; new cards append.
+    const positions = {};
+    for (let i = 0; i < rows.count; i++) positions[rows.get(i).key] = i;
+    list.sort((a, b) => (positions[a.key] ?? rows.count) - (positions[b.key] ?? rows.count));
     root.ticking = ticking;
     sync(list);
   }
@@ -201,7 +253,56 @@ Shell.Card {
     });
   }
 
+  Component {
+    id: dismissal
+    Process {
+      property string sessionId
+      onExited: (code) => {
+        if (code !== 0) console.warn("Could not dismiss agent card", sessionId);
+        sessionFile.reload();
+        destroy();
+      }
+    }
+  }
+
+  function dismiss(key, expectedReport) {
+    if (!key.startsWith("session:")) return false;
+    const sid = key.slice(8), report = root.sessions[sid];
+    if (!report) return false;
+    if (expectedReport && JSON.stringify(report) !== expectedReport) return false;
+    const stale = Date.now() - (report.time || 0) * 1000 > root.statusFreshness;
+    if ((report.state === "working" || report.state === "waiting") && !stale) return false;
+    const process = dismissal.createObject(root, {
+      sessionId: sid,
+      command: ["toasty-dismiss", sid, expectedReport || JSON.stringify(report)]
+    });
+    process.running = true;
+    return true;
+  }
+
+  IpcHandler {
+    target: "toastyDock"
+    function dismiss(sessionId: string): bool { return root.dismiss("session:" + sessionId, ""); }
+    function dismissReport(sessionId: string, expectedReport: string): bool { return root.dismiss("session:" + sessionId, expectedReport); }
+    function open(sessionId: string): bool {
+      for (let i = 0; i < rows.count; i++) {
+        const row = rows.get(i);
+        if (row.key === "session:" + sessionId) { root.open(row); return true; }
+      }
+      return false;
+    }
+    function status(): string {
+      const result = [];
+      for (let i = 0; i < rows.count; i++) {
+        const row = rows.get(i);
+        result.push({key: row.key, state: row.state, task: row.task, detail: row.detail, reportJson: row.reportJson});
+      }
+      return JSON.stringify(result);
+    }
+  }
+
   function open(row) {
+    if (row.key.startsWith("session:") && row.state === "done") dismiss(row.key, row.reportJson);
     if (row.link) Qt.openUrlExternally(row.link);
     else if (row.app) Shell.NiriMsg.focusApp(row.name, row.app);
     else Shell.NiriMsg.focusWindow(row.winId);
@@ -216,13 +317,13 @@ Shell.Card {
 
   // Library status colours: Working neutral, Waiting orange, Done blue, Failed red.
   function pillColor(state) {
-    return state === "waiting" ? "#FF8A00" : state === "done" ? "#2563EB"
-        : state === "failed" ? "#DC2626" : state === "working" ? "#E4DFE6" : "transparent";
+    return state === "ready" ? "#666666" : state === "waiting" ? "#FF8A00" : state === "done" ? "#2563EB"
+        : state === "unknown" ? "#666666" : state === "paused" ? "#8B6F47" : state === "failed" ? "#DC2626" : state === "working" ? "#E4DFE6" : "transparent";
   }
   function pillInk(state) { return state === "working" ? "#211E24" : "white"; }
   function label(state) {
-    return state === "waiting" ? "Waiting" : state === "done" ? "Done"
-        : state === "failed" ? "Failed" : state === "working" ? "Working" : "Idle";
+    return state === "ready" ? "Ready" : state === "waiting" ? "Needs you" : state === "done" ? "Done"
+        : state === "unknown" ? "Unknown" : state === "paused" ? "Paused" : state === "failed" ? "Failed" : state === "working" ? "Working" : "Idle";
   }
 
   Repeater {
@@ -231,6 +332,7 @@ Shell.Card {
       id: row
       required property int index
       required property string key
+      required property string reportJson
       required property int winId
       required property string app
       required property string link
@@ -238,22 +340,28 @@ Shell.Card {
       required property bool leaving
       required property string name
       required property string icon
+      required property string fullTask
       required property string task
+      required property string detail
       readonly property string status: state
+      readonly property bool dismissible: key.startsWith("session:") && state !== "working" && state !== "waiting"
       y: 4 + index * root.rowHeight
       Behavior on y { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
       width: root.width
       height: root.rowHeight
       opacity: leaving ? 0 : 1
       Behavior on opacity { NumberAnimation { duration: root.leaveDuration; easing.type: Easing.OutCubic } }
+      activeFocusOnTab: true
+      Keys.onReturnPressed: root.open(row)
+      Keys.onSpacePressed: root.open(row)
       Accessible.role: Accessible.Button
-      Accessible.name: name + ", " + root.label(status) + ": " + task
+      Accessible.name: name + ", " + root.label(status) + ": " + task + ". " + detail
       Accessible.onPressAction: root.open(row)
 
       // The library's Done moment: pill pops, mascot hops, check springs in.
       // The Done pop is skipped when reduced motion is on; the pill still turns blue.
-      onStatusChanged: if (status === "done" && !Notifications.State.reducedMotion) celebrate.restart()
-      Component.onCompleted: if (status === "done" && !Notifications.State.reducedMotion) celebrate.restart()
+      onStatusChanged: if (status === "done" && winId < 0 && !Notifications.State.reducedMotion) celebrate.restart()
+      Component.onCompleted: if (status === "done" && winId < 0 && !Notifications.State.reducedMotion) celebrate.restart()
       SequentialAnimation {
         id: celebrate
         ParallelAnimation {
@@ -273,7 +381,81 @@ Shell.Card {
       }
 
       HoverHandler { id: hover; cursorShape: Qt.PointingHandCursor }
-      TapHandler { onTapped: root.open(row) }
+      ToolTip {
+        id: detailTip
+        popupType: Popup.Window
+        x: row.width + 8
+        y: 0
+        visible: hover.hovered || row.activeFocus || dismissButton.activeFocus
+        delay: 500
+        timeout: 0
+        width: 300
+        padding: 14
+        text: row.name + "\n" + (row.fullTask || row.task) + "\n" + row.detail
+        contentItem: Text {
+          text: detailTip.text
+          textFormat: Text.PlainText
+          color: "#F0EDF2"
+          font.family: Shell.Theme.fontFamily
+          font.pixelSize: 12
+          wrapMode: Text.Wrap
+        }
+        background: Rectangle { color: "#29272D"; radius: 10; border.color: "#66606E" }
+      }
+
+      MouseArea {
+        anchors.fill: parent
+        property string pressedKey
+        property string pressedReport
+        onPressed: { pressedKey = row.key; pressedReport = row.reportJson; }
+        onClicked: if (pressedKey === row.key && pressedReport === row.reportJson) root.open(row)
+      }
+
+      Rectangle {
+        id: dismissButton
+        z: 2
+        visible: row.dismissible
+        opacity: hover.hovered || activeFocus ? 1 : 0
+        activeFocusOnTab: row.dismissible
+        Behavior on opacity {
+          NumberAnimation { duration: Notifications.State.reducedMotion ? 0 : 120 }
+        }
+        anchors.right: parent.right
+        anchors.rightMargin: 4
+        y: 0
+        width: 26; height: 26; radius: 6
+        color: dismissArea.pressed ? Qt.rgba(1, 1, 1, 0.20)
+            : dismissArea.containsMouse || activeFocus ? Qt.rgba(1, 1, 1, 0.10) : "transparent"
+        border.width: activeFocus ? 1 : 0
+        border.color: Qt.rgba(1, 1, 1, 0.5)
+        Keys.onPressed: event => {
+          if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Space || event.key === Qt.Key_Delete) {
+            root.dismiss(row.key, row.reportJson);
+            event.accepted = true;
+          }
+        }
+        Accessible.role: Accessible.Button
+        Accessible.name: "Dismiss " + row.name + " card"
+        Accessible.onPressAction: root.dismiss(row.key, row.reportJson)
+        Text {
+          anchors.centerIn: parent
+          text: "×"
+          color: "#D8D2DC"
+          font.family: Shell.Theme.fontFamily
+          font.pixelSize: 17
+        }
+        MouseArea {
+          id: dismissArea
+          enabled: hover.hovered || dismissButton.activeFocus
+          anchors.fill: parent
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          property string pressedKey
+          property string pressedReport
+          onPressed: { pressedKey = row.key; pressedReport = row.reportJson; }
+          onClicked: if (pressedKey === row.key) root.dismiss(pressedKey, pressedReport)
+        }
+      }
 
       Rectangle {
         x: 4; y: 2
@@ -323,15 +505,15 @@ Shell.Card {
           color: root.pillColor(row.status)
           Behavior on color { ColorAnimation { duration: 240 } }
           border.width: row.status === "idle" ? 1 : 0
-          border.color: Qt.rgba(1, 1, 1, 0.18)
+          border.color: "#AAA2AF"
           Row {
             id: pillRow
             x: 8; anchors.verticalCenter: parent.verticalCenter
             spacing: 4
             Text {
               anchors.verticalCenter: parent.verticalCenter
-              text: root.label(row.status)
-              color: row.status === "idle" ? Qt.rgba(1, 1, 1, 0.6) : root.pillInk(row.status)
+              text: row.winId >= 0 && row.status === "done" ? "Ended" : root.label(row.status)
+              color: row.status === "idle" ? "#5C5760" : root.pillInk(row.status)
               font.family: Shell.Theme.fontFamily; font.pixelSize: 11; font.weight: Font.DemiBold
             }
             StatusIcon {
@@ -346,8 +528,10 @@ Shell.Card {
           width: parent.width
           text: row.task
           textFormat: Text.PlainText
+          wrapMode: Text.Wrap
+          maximumLineCount: 2
           elide: Text.ElideRight
-          color: Qt.rgba(1, 1, 1, 0.6)
+          color: "#F0EDF2"
           font.family: Shell.Theme.fontFamily; font.pixelSize: 11
         }
       }
@@ -397,6 +581,15 @@ Shell.Card {
         }
       }
     }
+    Row {
+      visible: statusIcon.status === "paused"
+      anchors.centerIn: parent
+      spacing: 2
+      Repeater {
+        model: 2
+        Rectangle { width: 2; height: 7; radius: 0.5; color: statusIcon.ink }
+      }
+    }
     // Library check: green badge with a white ring, springing in 220ms after the pop starts.
     Rectangle {
       id: badge
@@ -419,9 +612,9 @@ Shell.Card {
       }
     }
     Text {
-      visible: statusIcon.status === "failed"
+      visible: statusIcon.status === "failed" || statusIcon.status === "unknown"
       anchors.centerIn: parent
-      text: "!"; color: "white"
+      text: statusIcon.status === "unknown" ? "?" : "!"; color: "white"
       font.pixelSize: 10; font.weight: Font.Bold
     }
   }

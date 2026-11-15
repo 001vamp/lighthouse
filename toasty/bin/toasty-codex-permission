@@ -10,6 +10,9 @@ the agent: no decision, and Codex's own prompt appears there.
 """
 import json, os, re, signal, subprocess, sys
 
+if os.environ.get('TOASTY_OWNED') == '1':
+    sys.exit(0)  # toastyd started this session and reports it itself
+
 NOTIFY = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toasty-notify')
 LOG = os.path.join(os.environ.get('XDG_STATE_HOME', os.path.expanduser('~/.local/state')),
                    'toasty', 'toasty.log')
@@ -57,6 +60,12 @@ def main():
     cwd = data.get('cwd') or os.getcwd()
     project = os.path.basename(cwd) or 'Codex'
     title, detail = describe(tool, args, cwd)
+    # Preserve the complete input, including edit contents and command arguments.
+    detail = json.dumps(args, ensure_ascii=False, indent=2)
+    complete = len(detail.encode('utf-8')) <= 16384
+    if not complete:
+        detail = 'Full request available in session (too large for a toast).'
+
     kitty = bool(os.environ.get('KITTY_WINDOW_ID'))
     log(f"tool={tool} session={data.get('session_id', '-')} kitty={kitty} keys={sorted(args) if isinstance(args, dict) else type(args).__name__}")
 
@@ -70,6 +79,14 @@ def main():
         if data.get('session_id'):
             cmd += ['--open', f"codex://threads/{data['session_id']}"]
 
+    if not complete:
+        cmd = [part for i, part in enumerate(cmd) if part != '--action' and (i == 0 or cmd[i - 1] != '--action')]
+        cmd.append('--incomplete-code')
+    if data.get('session_id'):
+        cmd += ['--session', str(data['session_id'])]
+    request_id = data.get('tool_use_id') or data.get('request_id')
+    if request_id:
+        cmd += ['--event', 'request:' + str(request_id), '--revision', str(request_id)]
     helper = subprocess.Popen(cmd + ['--code', detail or tool, title, ''], stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, text=True)
     # If Codex stops us (answered in the terminal, or its timeout), take the toast down too.

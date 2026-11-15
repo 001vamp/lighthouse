@@ -13,7 +13,8 @@ It works with **Claude Code** and **Codex**, in the terminal (kitty) and in thei
 ## Install
 
 ```bash
-git clone https://github.com/001vamp/lighthouse && cd lighthouse/toasty
+git clone --branch docs/toasty-design https://github.com/001vamp/lighthouse.git
+cd lighthouse/toasty
 bin/toasty install
 toasty doctor --toast
 ```
@@ -37,7 +38,7 @@ toasty doctor --toast
 
 - **The full experience needs a Toasty-aware shell.** Without one, toasts arrive as plain notifications that still have their buttons. Agent cards, the dock, the away card and the "Sent"/"Allowed" endings come from the Quickshell client in Pond, which is the reference shell. The [protocol](PROTOCOL.md) is open, so other shells can implement it.
 - **Replies only reach agents running in kitty.** The desktop apps don't offer a way in. Their toasts open the exact thread instead.
-- **Codex:** no "Always allow" (Codex doesn't accept rule changes from hooks yet) and no Failed state (Codex sends no failure event). While a Codex permission toast is up, Codex shows nothing in its terminal. So the toast steps aside as soon as you look at Codex, and Codex's own prompt takes over.
+- **Codex:** no "Always allow" (Codex doesn't accept rule changes from hooks yet) and no Failed state (Codex sends no failure event). While a Codex permission toast is up, Codex shows nothing in its terminal. For kitty, the toast steps aside when its exact terminal is focused. Desktop app focus cannot identify the thread, so it does not suppress another thread’s request.
 - **Terminal status is read from window titles,** so a CLI update that changes its title can break it. The patterns live in `agents.json`.
 
 ## Adding an agent
@@ -55,10 +56,33 @@ Then have the agent's hook call `toasty-notify` (see `toasty-notify --help`) and
 ## Development
 
 ```bash
-tests/run                 # private D-Bus session, fake notification server, fake kitty and niri
 bin/toasty install --link # use this checkout directly
+bash tools/check         # Rust formatting, build and Clippy; no tests
 ```
 
 ## License
 
 Personal project, no license chosen. The [shell client](shell/) includes files from Pond, which is under BSD 3-Clause, © Butterfly Interaction Inc.
+
+## Continue on another Linux machine
+
+The active development branch is `docs/toasty-design`. After cloning that branch,
+run `bin/toasty install` on each machine. Hooks, paths, runtime registries and
+conversation metadata are local to that machine. Git does not synchronize agent
+credentials or running sessions.
+
+The full desktop UI needs Pond, Quickshell and niri. Other notification servers
+receive ordinary notifications. The Rust daemon is separate from the existing
+hook UI; the new command-line client remains unfinished. See [HANDOFF.md](HANDOFF.md)
+for current engineering work.
+
+To update a copy installed from this branch:
+
+```bash
+git pull --ff-only
+bin/toasty install
+```
+
+Toasts use factual event headings and expandable reply previews. Permission
+requests retain up to 16 KiB of full tool input. Larger requests require review
+in the session and offer no toast approval buttons.

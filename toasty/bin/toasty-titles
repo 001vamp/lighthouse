@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""Read local conversation labels for visible app cards; never change lifecycle state."""
+from contextlib import closing
+import json
+import os
+from pathlib import Path
+import re
+import sqlite3
+
+
+def clean(value):
+    if not isinstance(value, str):
+        return ''
+    value = ' '.join(value.split())
+    return value if 0 < len(value) <= 240 else ''
+
+
+def codex_titles(ids):
+    home = Path(os.environ.get('CODEX_HOME', Path.home() / '.codex'))
+    for path in sorted(home.glob('state_*.sqlite'), key=lambda p: int(p.stem.split('_')[-1]) if p.stem.split('_')[-1].isdigit() else -1, reverse=True):
+        try:
+            with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=0.1)) as db:
+                columns = {row[1] for row in db.execute('pragma table_info(threads)')}
+                name = 'name' if 'name' in columns else 'NULL'
+                marks = ','.join('?' for _ in ids)
+                return {sid: clean(label) or clean(title) for sid, label, title in
+                        db.execute(f'SELECT id, {name}, title FROM threads WHERE id IN ({marks})', ids)}
+        except (sqlite3.Error, OSError):
+            continue
+    return {}
+
+
+def claude_title(sid):
+    home = Path(os.environ.get('CLAUDE_CONFIG_DIR', Path.home() / '.claude'))
+    for path in (home / 'projects').glob(f'*/{sid}.jsonl'):
+        try:
+            # Renames are appended. Bound reads even for very long conversations.
+            with path.open('rb') as source:
+                size = source.seek(0, 2)
+                source.seek(max(0, size - 262144))
+                lines = source.read(262144).splitlines()
+            for line in reversed(lines):
+                try:
+                    item = json.loads(line)
+                except (ValueError, UnicodeError):
+                    continue
+                if item.get('type') == 'custom-title' and item.get('sessionId') == sid:
+                    return clean(item.get('customTitle'))
+        except OSError:
+            continue
+    return ''
+
+
+def main():
+    runtime = Path(os.environ.get('XDG_RUNTIME_DIR', f'/tmp/toasty-{os.getuid()}'))
+    sessions = json.loads((runtime / 'toasty/sessions.json').read_text())
+    ids = [sid for sid in sessions if re.fullmatch(r'[a-fA-F0-9-]{36}', sid)][:64]
+    codex = [sid for sid in ids if sessions[sid].get('agent') == 'Codex']
+    result = codex_titles(codex) if codex else {}
+    for sid in ids:
+        if sessions[sid].get('agent') == 'Claude Code':
+            result[sid] = claude_title(sid)
+    print(json.dumps({sid: title for sid, title in result.items() if title}))
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, TypeError):
+        print('{}')
