@@ -1,0 +1,19 @@
+[package]
+name = "toasty-cli"
+description = "The toasty command: a thin client of toastyd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "toasty"
+path = "src/main.rs"
+
+[dependencies]
+toasty-proto.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true

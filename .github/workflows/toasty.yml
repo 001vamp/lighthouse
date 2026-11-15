@@ -1,0 +1,37 @@
+name: Toasty Rust checks
+
+on:
+  push:
+    paths:
+      - 'toasty/**'
+      - '.github/workflows/toasty.yml'
+  pull_request:
+    paths:
+      - 'toasty/**'
+      - '.github/workflows/toasty.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: toasty-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Rust ${{ matrix.toolchain }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ['1.90.0', stable]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: rustfmt, clippy
+      - name: Check formatting, build and lint
+        run: bash toasty/tools/check

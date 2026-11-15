@@ -1,0 +1,13 @@
+/target/
+node_modules/
+__pycache__/
+
+# Local observations and historical agent conversations
+spike/**/transcripts/
+spike/**/*-ready*
+spike/**/*-session*
+spike/**/last-session-id
+spike/**/*-result.json
+spike/**/observations.json
+ROADMAP.md.v1.bak
+REVIEW.html

@@ -1,0 +1,25 @@
+[package]
+name = "toastyd"
+description = "Toasty's daemon: owns agent sessions and serves the overlay, CLI and notifications"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+toasty-proto.workspace = true
+toasty-store.workspace = true
+toasty-broker.workspace = true
+toasty-backend.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rustix = { workspace = true, features = ["fs"] }
+clap.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

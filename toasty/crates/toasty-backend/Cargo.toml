@@ -1,0 +1,18 @@
+[package]
+name = "toasty-backend"
+description = "Agent backends for toastyd: the interface every agent sits behind, and its ACP implementation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rustix = { workspace = true, features = ["fs"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

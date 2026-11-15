@@ -1,0 +1,39 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/toasty-proto",
+    "crates/toasty-store",
+    "crates/toasty-broker",
+    "crates/toasty-backend",
+    "crates/toastyd",
+    "crates/toasty-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/001vamp/lighthouse"
+rust-version = "1.90"
+
+[workspace.dependencies]
+toasty-proto = { path = "crates/toasty-proto" }
+toasty-store = { path = "crates/toasty-store" }
+toasty-broker = { path = "crates/toasty-broker" }
+toasty-backend = { path = "crates/toasty-backend" }
+anyhow = "1"
+clap = { version = "4.6", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+rustix = { version = "1.1", features = ["process"] }
+rusqlite = { version = "0.37.0", features = ["bundled"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "io-util", "process", "sync", "signal", "time", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
