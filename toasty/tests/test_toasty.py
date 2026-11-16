@@ -272,13 +272,32 @@ class Hooks(Env):
         self.run_hook('toasty-claude-hook', {**base, 'hook_event_name': 'SessionEnd'}, env)
         self.assertNotIn('c1', self.sessions())
 
+    def fake_codex(self):
+        """A stand-in terminal `codex` to run hooks under, so they don't count as the app."""
+        codex = os.path.join(self.fakebin, 'codex')
+        with open(codex, 'w') as f:
+            f.write('#!/bin/sh\n"$@"\ntrue\n')
+        os.chmod(codex, 0o755)
+        return codex
+
+    def test_codex_app_permission_never_holds_the_turn(self):
+        payload = {'hook_event_name': 'PermissionRequest', 'session_id': 's', 'cwd': '/w', 'tool_name': 'Bash',
+                   'tool_input': {'command': 'npm test'}}
+        start = time.time()
+        r = self.run_hook('toasty-codex-permission', payload)
+        self.assertLess(time.time() - start, 5, 'returns without waiting for an answer')
+        self.assertEqual(r.stdout.strip(), '', 'no decision: the app\'s own prompt decides')
+        n = wait_for(lambda: self.calls('Notify') and self.calls('Notify')[-1])
+        self.assertEqual(n['actions'], [], 'no Allow/Deny to wait on')
+        self.assertEqual(n['hints']['x-toasty-open'], 'codex://threads/s')
+
     def test_codex_permission_allow_and_deny(self):
         payload = {'hook_event_name': 'PermissionRequest', 'session_id': 's', 'cwd': '/w', 'tool_name': 'Bash',
                    'tool_input': {'command': 'npm test'}}
         for button, behavior in (('allow', 'allow'), ('deny', 'deny')):
             before = len(self.calls('Notify'))
-            p = subprocess.Popen([os.path.join(BIN, 'toasty-codex-permission')], stdin=subprocess.PIPE,
-                                 stdout=subprocess.PIPE, text=True, env=self.env)
+            p = subprocess.Popen([self.fake_codex(), os.path.join(BIN, 'toasty-codex-permission')],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=self.env)
             p.stdin.write(json.dumps(payload)); p.stdin.close()
             n = wait_for(lambda: len(self.calls('Notify')) > before and self.calls('Notify')[-1])
             self.assertEqual(n['hints']['x-toasty-code'], 'npm test')
