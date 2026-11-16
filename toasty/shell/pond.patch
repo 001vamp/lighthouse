@@ -1,7 +1,7 @@
-diff --git a/Sidebar.qml b/Sidebar.qml
+diff --git c/Sidebar.qml w/Sidebar.qml
 index 0b0f497..2b85ece 100644
---- a/Sidebar.qml
-+++ b/Sidebar.qml
+--- c/Sidebar.qml
++++ w/Sidebar.qml
 @@ -10,6 +10,7 @@ import "media" as Media
  import "minimap" as Minimap
  import "notifications" as Notifications
@@ -44,10 +44,10 @@ index 0b0f497..2b85ece 100644
      KeyboardFeedback {
        id: keyboardFeedback
        screen: root.screen
-diff --git a/notifications/SidebarCard.qml b/notifications/SidebarCard.qml
+diff --git c/notifications/SidebarCard.qml w/notifications/SidebarCard.qml
 index 73add93..f73913c 100644
---- a/notifications/SidebarCard.qml
-+++ b/notifications/SidebarCard.qml
+--- c/notifications/SidebarCard.qml
++++ w/notifications/SidebarCard.qml
 @@ -10,7 +10,8 @@ Item {
    onYChanged: blurRegion.changed()
    readonly property bool empty: Notifications.State.notificationCount === 0
@@ -58,10 +58,10 @@ index 73add93..f73913c 100644
    readonly property real inlineAmount: transientProgress * (1 - Shell.Theme.collapseHeight(collapseProgress))
    readonly property real previewOpacity: inlineAmount >= 0.54 ? 1 : 0
    readonly property var notification: Notifications.State.currentTransient
-diff --git a/notifications/State.qml b/notifications/State.qml
-index 368ef1b..1bf1fa0 100644
---- a/notifications/State.qml
-+++ b/notifications/State.qml
+diff --git c/notifications/State.qml w/notifications/State.qml
+index 368ef1b..3727e27 100644
+--- c/notifications/State.qml
++++ w/notifications/State.qml
 @@ -3,6 +3,7 @@ import QtQuick
  import Quickshell
  import Quickshell.Io
@@ -70,7 +70,7 @@ index 368ef1b..1bf1fa0 100644
  import ".." as Shell
  
  Singleton {
-@@ -13,12 +14,87 @@ Singleton {
+@@ -13,12 +14,89 @@ Singleton {
    readonly property var recentApps: _recentApps(historyNotifications)
    property string transientId: ""
    property string transientOutputName: ""
@@ -93,14 +93,14 @@ index 368ef1b..1bf1fa0 100644
 +      + '[ -n "$p" ] && grep -qaE "toasty-notify|pond-agent-notify" "/proc/$p/cmdline" 2>/dev/null; exit; fi; '
 +      + 'sleep 0.1; done; exit 1', "sh"]
 +
-+  // Away: no input for 2 minutes. Done toasts wait (keeping their time) until you're back,
++  // Away: no input for 5 minutes. Done toasts wait (keeping their time) until you're back,
 +  // then one "While you were away" card sums up what happened. Needs and Failed still show.
-+  IdleMonitor { id: awayMonitor; timeout: 120; respectInhibitors: true }
++  IdleMonitor { id: awayMonitor; timeout: 300; respectInhibitors: true }
 +  readonly property bool away: awayMonitor.isIdle || pretendAway
 +  property bool pretendAway: false
 +  property var awayLog: []
 +  onAwayChanged: if (!away) _welcomeBack()
-+  // A breath: 1s without input. A Done toast waits for one (10s at most) so it doesn't
++  // A breath: 1s without input. A Done toast waits for one (3s at most) so it doesn't
 +  // slide in mid-keystroke. Needs and Failed never wait.
 +  IdleMonitor { id: breathMonitor; timeout: 1; respectInhibitors: false }
 +  property string breathFor: ""
@@ -109,7 +109,7 @@ index 368ef1b..1bf1fa0 100644
 +    id: breath
 +    interval: 200; repeat: true
 +    onTriggered: {
-+      if (!breathMonitor.isIdle && Date.now() - root.breathSince < 10000) return;
++      if (!breathMonitor.isIdle && Date.now() - root.breathSince < 3000) return;
 +      stop();
 +      const id = root.breathFor;
 +      root.breathFor = "";
@@ -127,7 +127,9 @@ index 368ef1b..1bf1fa0 100644
 +          stamp: root.stamps[root.transientId] || "", restored: !!root.currentTransient.restored,
 +          lines: (root.currentTransient.lines || []).length } : null,
 +        queue: root.queue.length, away: root.away, held: root.awayLog.length,
-+        breathing: root.breathFor !== "", reducedMotion: root.reducedMotion });
++        breathing: root.breathFor !== "", reducedMotion: root.reducedMotion,
++        plainHeld: root.plainRecent.filter(p => p.held).length,
++        merged: Object.keys(root.mergedInto).length });
 +    }
 +    // Press a button on the toast on screen, as if clicked (tests and keyboard tools).
 +    function press(identifier: string): void {
@@ -158,7 +160,7 @@ index 368ef1b..1bf1fa0 100644
    property bool historyWritable: false
  
    SystemClock {
-@@ -75,13 +151,33 @@ Singleton {
+@@ -75,13 +153,34 @@ Singleton {
      bodySupported: true
      bodyMarkupSupported: false
      imageSupported: false
@@ -191,10 +193,11 @@ index 368ef1b..1bf1fa0 100644
 +      code: String(hint("code")),
 +      suggestions: String(hint("suggestions")).split("\n").filter(s => s.trim()),
 +      restored: !!restored[id],
++      nativeId: nativeFor[id] || "",
        timestamp: saved ? saved.timestamp : Date.now() };
    }
  
-@@ -90,9 +186,133 @@ Singleton {
+@@ -90,9 +189,194 @@ Singleton {
      const id = Quickshell.processId + ":" + notification.id;
      if (!live[id]) live[id] = watcher.createObject(root, { notification, notificationId: id });
      live[id].refresh();
@@ -214,8 +217,68 @@ index 368ef1b..1bf1fa0 100644
 +        aliveCheck.createObject(root, { notificationId: id, serverId: notification.id });
 +      return;
 +    }
++    if (mergedInto[id]) return;
++    const raw = String(notification.appName || "");
++    const name = (agentInfo(notification) || {}).name;
++    if (name && !raw.startsWith("Toasty|") && !raw.startsWith("PondAgent|")) {
++      _receiveAppNotification(id, name);
++      return;
++    }
++    if (name) _pairToasty(id, name);
 +    _enqueue(id);
 +  }
++
++  // An agent's desktop app sends its own notification for the same moment as the hook's Toasty
++  // toast, in either order. One card is enough: the Toasty one shows, and clicking it uses the
++  // app's own action, which knows the exact session. An app notification with no Toasty toast
++  // beside it (say, a plain ChatGPT chat) still shows, after a short wait for its partner.
++  readonly property int pairWindow: 3000
++  readonly property int plainHold: 1500
++  property var plainRecent: []     // {id, name, at, held}: app notifications not yet paired
++  property var lastToasty: ({})    // agent name → {id, at} of its newest Toasty toast
++  property var mergedInto: ({})    // app notification id → the Toasty toast showing for it
++  property var nativeFor: ({})     // Toasty toast id → the app notification merged into it
++
++  function _receiveAppNotification(id, name) {
++    const now = Date.now();
++    plainRecent = plainRecent.filter(p => now - p.at < pairWindow);
++    const partner = lastToasty[name];
++    if (partner && now - partner.at < pairWindow && live[partner.id] && !nativeFor[partner.id]) {
++      _merge(id, partner.id);
++      return;
++    }
++    plainRecent = [...plainRecent, { id, name, at: now, held: true }];
++    _later(() => {
++      const entry = plainRecent.find(p => p.id === id);
++      if (!entry) return;  // it found its partner
++      plainRecent = plainRecent.map(p => p.id === id ? Object.assign({}, p, { held: false }) : p);
++      if (live[id]) _enqueue(id);
++    }, plainHold);
++  }
++
++  function _pairToasty(id, name) {
++    const now = Date.now();
++    lastToasty = Object.assign({}, lastToasty, { [name]: { id, at: now } });
++    const plain = plainRecent.find(p => p.name === name && now - p.at < pairWindow && live[p.id]);
++    if (plain && !nativeFor[id]) _merge(plain.id, id);
++  }
++
++  // Take the app notification off the screen but keep it alive, so its click action still works.
++  function _merge(plainId, toastyId) {
++    mergedInto = Object.assign({}, mergedInto, { [plainId]: toastyId });
++    nativeFor = Object.assign({}, nativeFor, { [toastyId]: plainId });
++    plainRecent = plainRecent.filter(p => p.id !== plainId);
++    queue = queue.filter(q => q !== plainId);
++    awayLog = awayLog.filter(q => q !== plainId);
++    if (breathFor === plainId) { breath.stop(); breathFor = ""; }
++    if (transientId === plainId) transientId = "";
++    historyNotifications = historyNotifications.filter(n => n.id !== plainId);
++    activeNotifications = activeNotifications.filter(n => n.id !== plainId);
++    live[toastyId]?.refresh();
++  }
++
++  // Runs from this singleton's own scope, so it survives whatever object asked for it.
++  function _later(fn, interval) { later.createObject(root, { fn, interval }); }
 +
 +  Component {
 +    id: aliveCheck
@@ -285,6 +348,7 @@ index 368ef1b..1bf1fa0 100644
 +      lines: items.map(n => ({ id: n.id, name: (agentInfo(n) || {}).name || n.appName,
 +                               kind: n.kind || "info", context: n.context, text: message(n),
 +                               windowId: n.windowId, openUrl: n.openUrl, appName: n.appName,
++                               nativeId: n.nativeId,
 +                               desktopEntry: n.desktopEntry })),
 +      opened: [] }, ...activeNotifications];
 +    if (transientId === "" && breathFor === "" && !advance.running) _show(id, true);
@@ -331,7 +395,16 @@ index 368ef1b..1bf1fa0 100644
      }
    }
  
-@@ -116,12 +336,17 @@ Singleton {
+@@ -105,7 +389,7 @@ Singleton {
+       property bool closed: false
+ 
+       function refresh() {
+-        if (closed) return;
++        if (closed || root.mergedInto[notificationId]) return;
+         const data = root.snapshot(notification, notificationId);
+         root.activeNotifications = [data, ...root.activeNotifications.filter(n => n.id !== notificationId)];
+         if (!notification.transient) {
+@@ -116,12 +400,17 @@ Singleton {
          popupTimeout.restart();
        }
        function scheduleRefresh() { Qt.callLater(refresh); }
@@ -350,7 +423,7 @@ index 368ef1b..1bf1fa0 100644
          }
        }
        Connections {
-@@ -130,9 +355,17 @@ Singleton {
+@@ -130,9 +419,19 @@ Singleton {
          function onBodyChanged() { entry.scheduleRefresh(); }
          function onAppIconChanged() { entry.scheduleRefresh(); }
          function onClosed(reason) {
@@ -363,14 +436,16 @@ index 368ef1b..1bf1fa0 100644
 +          // stopped waiting): say so for a moment instead of vanishing. Never claim an answer.
 +          if (root.transientId === id && reason === NotificationCloseReason.CloseRequested && !root.stamps[id]) {
 +            root.stamp(id, "Handled in the session");
-+            later.createObject(root, { fn: () => root.remove({ id }), interval: 900 });
++            // Not created from here: this object is destroyed below, and with it anything
++            // that still needs its scope when the timer fires.
++            root._removeAfter(id, 900);
 +          } else {
 +            root.remove({ id });
 +          }
            entry.destroy();
          }
        }
-@@ -149,6 +382,64 @@ Singleton {
+@@ -149,6 +448,64 @@ Singleton {
      return null;
    }
  
@@ -435,7 +510,7 @@ index 368ef1b..1bf1fa0 100644
    function _identity(notification) {
      const raw = notification.desktopEntry || notification.appName || "unknown";
      return raw.toLowerCase().replace(/[^a-z0-9]+/g, "");
-@@ -175,6 +466,17 @@ Singleton {
+@@ -175,6 +532,17 @@ Singleton {
  
    function iconSource(notification) {
      const rawIcon = String(notification.appIcon || "");
@@ -453,7 +528,7 @@ index 368ef1b..1bf1fa0 100644
      if (rawIcon.startsWith("file:") || rawIcon.startsWith("image:")
          || rawIcon.startsWith("qrc:"))
        return rawIcon;
-@@ -239,17 +541,25 @@ Singleton {
+@@ -239,17 +607,37 @@ Singleton {
    function togglePanel(outputName) {
      if (notificationCount === 0) return;
      if (panelOpen && panelOutputName === outputName) { closePanel(); return; }
@@ -469,10 +544,22 @@ index 368ef1b..1bf1fa0 100644
 +    panelOpen = false;
 +    if (transientId === "" && queue.length) advance.restart();
 +  }
++
++  function _removeAfter(id, interval) { _later(() => remove({ id }), interval); }
  
    function remove(notification) {
      if (!notification || !notification.id) return;
      const id = notification.id;
++    const native = nativeFor[id];
++    if (native) {
++      nativeFor = Object.assign({}, nativeFor, { [id]: undefined });
++      if (live[native]) live[native].notification.dismiss();
++    }
++    if (mergedInto[id]) {
++      const rest = Object.assign({}, mergedInto);
++      delete rest[id];
++      mergedInto = rest;
++    }
 +    queue = queue.filter(q => q !== id);
      if (transientId === id) transientId = "";
 +    if (breathFor === id) { breath.stop(); breathFor = ""; }
@@ -480,7 +567,7 @@ index 368ef1b..1bf1fa0 100644
      historyNotifications = historyNotifications.filter(n => n.id !== id);
      activeNotifications = activeNotifications.filter(n => n.id !== id);
      if (live[id]) live[id].notification.dismiss();
-@@ -257,20 +567,61 @@ Singleton {
+@@ -257,20 +645,64 @@ Singleton {
  
    function activate(notification) {
      if (!notification || !notification.id) return;
@@ -496,12 +583,15 @@ index 368ef1b..1bf1fa0 100644
  
 +  function _focus(notification) {
 +    const n = live[notification.id]?.notification;
-+    const action = n?.actions.find(a => a.identifier === "default");
++    const own = n?.actions.find(a => a.identifier === "default");
++    const action = own || live[notification.nativeId]?.notification.actions.find(a => a.identifier === "default");
 +    // Focus the window directly too: the sender behind the default action may be gone.
 +    if (notification.windowId) Shell.NiriMsg.focusWindow(notification.windowId);
 +    if (notification.openUrl) Qt.openUrlExternally(notification.openUrl);
 +    else if (action) action.invoke();
-+    else if (!notification.windowId) Shell.NiriMsg.focusApp(notification.appName, notification.desktopEntry);
++    // The app's own action opens the session but may not raise its window from here.
++    if (!notification.openUrl && !own && !notification.windowId)
++      Shell.NiriMsg.focusApp(notification.appName, notification.desktopEntry);
 +  }
 +
 +  function stamp(id, text) { stamps = Object.assign({}, stamps, { [id]: text }); }
@@ -531,7 +621,7 @@ index 368ef1b..1bf1fa0 100644
 +    if (!done) { remove(notification); return; }
 +    const id = notification.id;
 +    stamp(id, done);
-+    later.createObject(root, { fn: () => root.remove({ id }), interval: 700 });
++    _removeAfter(id, 700);
 +  }
 +
    function clearAll() {
@@ -546,10 +636,10 @@ index 368ef1b..1bf1fa0 100644
      transientId = "";
      closePanel();
    }
-diff --git a/notifications/ToastWindow.qml b/notifications/ToastWindow.qml
+diff --git c/notifications/ToastWindow.qml w/notifications/ToastWindow.qml
 index c86d2a5..b5861e4 100644
---- a/notifications/ToastWindow.qml
-+++ b/notifications/ToastWindow.qml
+--- c/notifications/ToastWindow.qml
++++ w/notifications/ToastWindow.qml
 @@ -15,32 +15,41 @@ PanelWindow {
    readonly property string outputName: bar && bar.screen ? bar.screen.name : ""
    readonly property bool outputMatches: Notifications.State.transientOutputName === ""

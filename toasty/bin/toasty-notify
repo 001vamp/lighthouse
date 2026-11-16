@@ -86,7 +86,8 @@ agent_entry = next((e for k, e in registry().items()
 # Replies are typed only into a terminal whose foreground program is this agent.
 expected = os.path.basename(a.expect) if a.expect else agent_entry.get('command', '')
 can_reply = a.reply and (kitty is not None or (not a.kitty and not a.detach))
-listening = bool(kitty or actions or can_reply)
+# Withdrawing on focus needs someone left to do it.
+listening = bool(kitty or actions or can_reply or a.withdraw_if_focused)
 
 LOG = os.path.join(os.environ.get('XDG_STATE_HOME', os.path.expanduser('~/.local/state')),
                    'toasty', 'toasty.log')
@@ -376,7 +377,7 @@ if listening:
         gi.require_version('GLibUnix', '2.0')
         from gi.repository import GLibUnix
         signal_add = GLibUnix.signal_add
-    except (ImportError, ValueError):
+    except (ImportError, ValueError, AttributeError):  # older PyGObject: no GLibUnix.signal_add
         signal_add = GLib.unix_signal_add
     for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
         signal_add(GLib.PRIORITY_HIGH, sig, give_up)

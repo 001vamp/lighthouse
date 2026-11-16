@@ -1,0 +1,34 @@
+name: Toasty
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'toasty/**'
+      - '.github/workflows/toasty.yml'
+  pull_request:
+    paths:
+      - 'toasty/**'
+      - '.github/workflows/toasty.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: toasty-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Toasty tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install D-Bus and Python GObject
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends dbus python3-gi gir1.2-glib-2.0 libglib2.0-bin
+      - name: Run tests
+        env:
+          PATH: /usr/bin:/bin:/usr/sbin:/sbin
+        run: toasty/tests/run

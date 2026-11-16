@@ -43,6 +43,10 @@ A sender that listens for answers writes files into `$XDG_RUNTIME_DIR/toasty/mar
 - **`<id>.delivered`** is written once a reply has really reached the agent, e.g. typed into its terminal. The shell shows "Sent to …" only when this appears, and "Couldn't deliver" when it doesn't.
 - **Clean-up:** markers are removed when the sender exits. Markers left behind by a killed sender are cleaned up by the next sender.
 
+## App notifications
+
+An agent's desktop app may send its own notification for the same moment as a Toasty toast. A shell should show one card: if a notification from a registered agent's app (matched by `desktop-entry` or app name) arrives within 3 seconds of a Toasty toast for that agent, in either order, merge them. Keep the app's notification alive so its `default` action can open the session when the card is clicked. One with no partner is shown on its own.
+
 ## Agent state files
 
 Hooks report agent state for the dock in `$XDG_RUNTIME_DIR/toasty/`:
