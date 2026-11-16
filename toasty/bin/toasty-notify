@@ -400,6 +400,12 @@ try:
     if cache_path:
         with open(cache_path, 'w') as output:
             json.dump({'owner': owner, 'id': nid, 'revision': a.revision}, output)
+    if listening:  # claimed under the slot lock, so an older helper can't take it back
+        os.makedirs(MARKERS, mode=0o700, exist_ok=True)
+        prune_markers()
+        clear_markers()
+        with open(marker('alive'), 'w') as f:
+            f.write(str(os.getpid()))
 except (GLib.Error, OSError, ValueError) as e:
     log(f'Notify failed: {e}')
     sys.exit(f'toasty-notify: {e}')
@@ -423,11 +429,6 @@ def give_up():
     return False
 
 if listening:
-    os.makedirs(MARKERS, mode=0o700, exist_ok=True)
-    prune_markers()
-    clear_markers()
-    with open(marker('alive'), 'w') as f:
-        f.write(str(os.getpid()))
     GLib.timeout_add_seconds(a.timeout, give_up)
     if cache_path:  # a replaced helper exits instead of idling until its timeout
         GLib.timeout_add_seconds(2, lambda: owned() or loop.quit())
