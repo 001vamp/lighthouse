@@ -32,7 +32,7 @@ POND_OVERLAY = os.path.join(os.environ.get('XDG_CONFIG_HOME', os.path.join(HOME,
 POND_MARKER = '.toasty'
 SHELL = os.path.join(ROOT, 'shell')
 
-HELPERS = ['toasty-notify', 'toasty-claude-hook', 'toasty-claude-permission',
+HELPERS = ['toasty-dismiss', 'toasty-notify', 'toasty-claude-hook', 'toasty-claude-permission',
            'toasty-codex-notify', 'toasty-codex-status', 'toasty-codex-permission']
 LIBS = ['toastylib.py']  # imported by the helpers, so it goes next to them
 LEGACY = re.compile(r'/pond-(claude|codex)-[a-z]+$|/pond-agent-notify$')
@@ -46,6 +46,7 @@ def hook(name, **extra):
 # Which hook runs on which event. Status hooks are async (Claude) or short (Codex) so they
 # never slow an agent down; the permission hooks wait for your answer, under the agent's limit.
 CLAUDE_HOOKS = {
+    'SessionStart': [hook('toasty-claude-hook', **{'async': True})],
     'Notification': [hook('toasty-claude-hook')],
     'Stop': [hook('toasty-claude-hook')],
     'StopFailure': [hook('toasty-claude-hook')],
