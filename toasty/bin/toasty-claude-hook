@@ -165,7 +165,7 @@ def main():
         return set_session(data, project, 'ready')
     if event == 'Interrupt':
         return set_session(data, project, 'paused')
-    if event == 'UserPromptSubmit' and (not previous.get('task') or previous.get('task', '').strip().lower() in ('hi', 'hello', 'ok', 'yes', 'continue', 'do tht', 'do that', 'do it')):
+    if event == 'UserPromptSubmit':
         mark_failed(None)
         return set_session(data, project, 'working')
     if event == 'PostToolUse':  # a tool ran, so any permission prompt was answered
