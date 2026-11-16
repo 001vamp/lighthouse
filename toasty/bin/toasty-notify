@@ -330,13 +330,27 @@ hints['x-toasty-event-time'] = GLib.Variant('s', str(int(time.time() * 1000)))
 loop = GLib.MainLoop()
 nid = None
 
+def as_owner(act):
+    """Run act only while this helper owns the toast. The slot lock keeps a replacement from
+    claiming it in between, so a superseded helper never acts on its successor."""
+    lock = open(cache_path + '.lock', 'a') if cache_path else None
+    try:
+        if lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        if not owned():
+            return False
+        act()
+        return True
+    finally:
+        if lock:
+            lock.close()
+
 def on_signal(_conn, _sender, _path, _iface, member, params):
     args = params.unpack()
-    if args[0] != nid:
-        return
-    if not owned():
+    if args[0] == nid and not as_owner(lambda: handle(member, args)):
         loop.quit()
-        return
+
+def handle(member, args):
     if member == 'ActionInvoked':
         emit(f'action:{args[1]}')
         if args[1] == 'default':
@@ -423,8 +437,7 @@ def withdraw():
         pass
 
 def give_up():
-    if owned():
-        withdraw()
+    as_owner(withdraw)
     loop.quit()
     return False
 
@@ -451,5 +464,4 @@ if listening:
     try:
         loop.run()
     finally:
-        if owned():
-            clear_markers()
+        as_owner(clear_markers)
