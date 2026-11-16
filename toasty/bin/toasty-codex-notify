@@ -41,10 +41,15 @@ try:
         subprocess.run([os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toasty-codex-status')],
                        input=json.dumps(payload), text=True, timeout=3)
         project = os.path.basename(payload.get('cwd') or os.getcwd()) or 'Codex'
-        text = re.sub(r'\s+', ' ', payload.get('last-assistant-message') or '').strip()
-        message = (text[:220] + ('…' if len(text) > 220 else '')) or 'Finished its turn.'
+        text = str(payload.get('last-assistant-message') or '').strip()
+        message = (text[:16000] + ('\n\nPreview limit reached. Open session for the full reply.' if len(text) > 16000 else '')) or 'Finished its turn.'
         cmd = [NOTIFY, '--agent', 'Codex', '--provider', 'OpenAI', '--kind', 'done', '--context', project,
                '--detach']
+        if thread:
+            cmd += ['--session', thread, '--event', 'completion']
+        turn = payload.get('turn-id') or payload.get('turn_id')
+        if turn:
+            cmd += ['--revision', str(turn)]
         if in_kitty:
             cmd += ['--kitty', '--reply', '--skip-if-focused']
         elif in_desktop_app():

@@ -175,7 +175,8 @@ def main():
             # toasty-claude-permission already put up an Allow/Deny toast for this prompt.
             if os.path.exists(os.path.join(RUNTIME, f"claude-perm-{data.get('session_id', 'none')}")):
                 return
-            notify(data, '--kind', 'needs', '--context', project, 'Needs your permission', message)
+            notify(data, '--kind', 'needs', '--context', project, '--reason', 'approval',
+                   'Needs your permission', message)
         else:
             try:
                 if time.time() - os.path.getmtime(stamp) < 600:

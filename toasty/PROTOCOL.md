@@ -17,13 +17,14 @@ Toasty|<agent name>|<provider>|<model>|<icon>
 
 | Hint | Type | Meaning |
 |---|---|---|
-| `x-toasty-kind` | string | `info`, `done`, `needs` or `failed`. `needs` and `failed` are sticky: they never time out. |
+| `x-toasty-kind` | string | `info`, `done`, `needs`, `paused` or `failed`. `needs`, `paused` and `failed` are sticky: they never time out. |
 | `x-toasty-context` | string | A short label shown beside the time, usually the project folder. |
 | `x-toasty-code` | string | Text shown in monospace under the title, e.g. the exact command waiting for approval. The body becomes its caption. |
+| `x-toasty-details` | string | Full text behind "Show details", e.g. the complete request input. Without it, details show the code. |
 | `x-toasty-suggestions` | string | Newline-separated one-click replies. |
 | `x-toasty-window` | string | The compositor window id of the agent's terminal (niri today), so a click can raise it even after the sender has exited. |
 | `x-toasty-open` | string | A link to open on click instead, e.g. `codex://threads/<id>`. |
-| `urgency` | byte | `2` (critical) for `needs` and `failed`, otherwise `1`. |
+| `urgency` | byte | `2` (critical) for `needs`, `paused` and `failed`, otherwise `1`. |
 | `resident` | boolean | Always `true`. The shell dismisses the toast itself once it's handled, so it can show what happened ("Sent", "Allowed"). |
 
 Shells should also accept the pre-release names `x-pond-*`. When both are present, `x-toasty-*` wins.
@@ -61,3 +62,36 @@ Hooks report agent state for the dock in `$XDG_RUNTIME_DIR/toasty/`:
   - Replies are typed into a terminal only when its foreground program is the agent named in the registry, never into a shell. Every attempt is checked again right before typing.
 - What a fake toast *can* do is ask you to type something. Treat a toast asking for a password or secret as fake: agents never ask that way.
 - Other programs running as you can see typed replies on the session bus.
+
+## Notification event metadata
+
+`toasty-notify` accepts optional `--session`, `--event`, `--revision`, and `--reason`
+fields. They become `x-toasty-session`, `x-toasty-event-revision`,
+`x-toasty-report-revision`, `x-toasty-event-time`, and `x-toasty-reason` hints.
+The report revision is read from the local session registry when available.
+Event time is milliseconds since the epoch. A `needs` toast with reason `approval`
+is a permission prompt even when it carries no buttons.
+
+An event replacement slot is scoped by agent, exact session, and event key.
+Completion producers use the `completion` slot. Approval producers use an exact
+request ID when the frontend supplies one. Requests without an ID are not merged.
+The helper serializes each slot under a file lock and scopes saved notification
+IDs to the notification server's D-Bus owner. A repeated nonempty event revision
+is ignored. New revisions replace the slot and reset the toast's interaction state.
+Neither visible text nor a folder name identifies an event.
+
+Permission producers send a one-line summary as `x-toasty-code` and the full JSON
+tool input, up to 16 KiB, as `x-toasty-details`. Beyond that limit they send an
+explicit review notice, set `x-toasty-code-complete=false` (`--incomplete-code`),
+and omit all approval actions. The shell hides approval actions for a visually
+truncated summary until details are expanded. Dynamic text uses plain text,
+including away rows, code, context, and captions.
+
+The shell retires a linked event once a new registry revision supersedes it:
+completion when the session works or waits again, a request when it works, ends,
+pauses or fails, and a pause or failure when it works, waits or finishes. A request
+may step in front of a sticky paused or failed toast; those return to the head of
+the line. The shell checks request receiver markers periodically and again before
+a button action. Without matching report metadata it does not infer lifecycle
+state. Closing, opening, timing out, or focusing a toast supplies no permission
+decision. Desktop app focus does not prove exact-session focus.

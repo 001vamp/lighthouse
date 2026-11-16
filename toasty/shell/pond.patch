@@ -59,7 +59,7 @@ index 73add93..f73913c 100644
    readonly property real previewOpacity: inlineAmount >= 0.54 ? 1 : 0
    readonly property var notification: Notifications.State.currentTransient
 diff --git c/notifications/State.qml w/notifications/State.qml
-index 368ef1b..3727e27 100644
+index 368ef1b..bd5b0d0 100644
 --- c/notifications/State.qml
 +++ w/notifications/State.qml
 @@ -3,6 +3,7 @@ import QtQuick
@@ -160,7 +160,7 @@ index 368ef1b..3727e27 100644
    property bool historyWritable: false
  
    SystemClock {
-@@ -75,13 +153,34 @@ Singleton {
+@@ -75,24 +153,268 @@ Singleton {
      bodySupported: true
      bodyMarkupSupported: false
      imageSupported: false
@@ -170,7 +170,8 @@ index 368ef1b..3727e27 100644
 +    // on click (e.g. a Codex thread), and code to show in monospace (e.g. a command to approve).
 +    // The x-pond-* names are the same hints from before the rename, still accepted.
 +    extraHints: ["x-toasty-kind", "x-toasty-suggestions", "x-toasty-context", "x-toasty-window",
-+                 "x-toasty-open", "x-toasty-code",
++                 "x-toasty-open", "x-toasty-code", "x-toasty-details", "x-toasty-code-complete", "x-toasty-reason",
++                 "x-toasty-session", "x-toasty-report-revision", "x-toasty-event-time", "x-toasty-event-revision",
 +                 "x-pond-kind", "x-pond-suggestions", "x-pond-context", "x-pond-window", "x-pond-open",
 +                 "x-pond-code"]
      onNotification: notification => root.receive(notification)
@@ -180,6 +181,7 @@ index 368ef1b..3727e27 100644
      const saved = _findById(historyNotifications, id) || _findById(activeNotifications, id);
 -    return { id, summary: n.summary, body: n.body, appName: n.appName,
 -      appIcon: n.appIcon, desktopEntry: n.desktopEntry,
+-      timestamp: saved ? saved.timestamp : Date.now() };
 +    const raw = n.hints || {};
 +    const hint = name => raw["x-toasty-" + name] || raw["x-pond-" + name] || "";
 +    return { id, serverId: n.id, summary: n.summary, body: n.body, appName: n.appName,
@@ -191,13 +193,45 @@ index 368ef1b..3727e27 100644
 +      windowId: String(hint("window")),
 +      openUrl: String(hint("open")),
 +      code: String(hint("code")),
++      details: String(hint("details")),
++      codeComplete: String(hint("code-complete")) !== "false",
++      reason: String(hint("reason")),
++      eventRevision: String(hint("event-revision")),
++      sessionKey: String(hint("session")),
++      reportRevision: String(hint("report-revision")),
 +      suggestions: String(hint("suggestions")).split("\n").filter(s => s.trim()),
 +      restored: !!restored[id],
 +      nativeId: nativeFor[id] || "",
-       timestamp: saved ? saved.timestamp : Date.now() };
++      timestamp: Number(hint("event-time")) || (saved ? saved.timestamp : Date.now()) };
    }
  
-@@ -90,9 +189,194 @@ Singleton {
++  property var sessionReports: ({})
++  FileView {
++    path: Quickshell.env("XDG_RUNTIME_DIR") + "/toasty/sessions.json"
++    watchChanges: true
++    printErrors: false
++    onFileChanged: reload()
++    onLoaded: {
++      try { root.sessionReports = JSON.parse(text()); root.retireObsoleteEvents(); }
++      catch (e) { /* A partial/unreadable report is not a lifecycle event. */ }
++    }
++  }
++  function obsoleteEvent(n) {
++    if (!n || !n.sessionKey || !n.reportRevision) return false;
++    const report = sessionReports[n.sessionKey];
++    if (!report || report.revision === n.reportRevision) return false;
++    if (n.kind === "done") return report.state === "working" || report.state === "waiting";
++    // A pause or failure is over once the session works, asks or finishes again.
++    if (n.kind === "paused" || n.kind === "failed") return ["working", "waiting", "done"].includes(report.state);
++    return n.kind === "needs" && ["working", "done", "paused", "failed"].includes(report.state);
++  }
++  function retireObsoleteEvents() {
++    for (const n of activeNotifications.slice())
++      if (obsoleteEvent(n)) remove(n);
++    awayLog = awayLog.filter(id => !obsoleteEvent(_findById(historyNotifications, id)));
++  }
+   function receive(notification) {
+     notification.tracked = true;
      const id = Quickshell.processId + ":" + notification.id;
      if (!live[id]) live[id] = watcher.createObject(root, { notification, notificationId: id });
      live[id].refresh();
@@ -211,7 +245,7 @@ index 368ef1b..3727e27 100644
 +      // in history. Deferred so the saved history (and its original timestamp) is loaded first.
 +      const hints = notification.hints || {};
 +      const kind = String(hints["x-toasty-kind"] || hints["x-pond-kind"] || "");
-+      const sticky = kind === "needs" || kind === "failed"
++      const sticky = kind === "needs" || kind === "paused" || kind === "failed"
 +          || (!kind && notification.urgency === NotificationUrgency.Critical);
 +      if (sticky && agentInfo(notification))
 +        aliveCheck.createObject(root, { notificationId: id, serverId: notification.id });
@@ -303,6 +337,12 @@ index 368ef1b..3727e27 100644
 +  function _enqueue(id) {
 +    const notification = live[id].notification;
 +    const urgent = notification.urgency === NotificationUrgency.Critical;
++    // Who this one may step in front of: anything routine and, for a request, a sticky
++    // paused or failed card that only reports.
++    const kindOf = q => { const h = live[q]?.notification.hints || {}; return String(h["x-toasty-kind"] || h["x-pond-kind"] || ""); };
++    const request = urgent && kindOf(id) === "needs";
++    const yields = q => live[q]?.notification.urgency !== NotificationUrgency.Critical
++        || (request && (kindOf(q) === "paused" || kindOf(q) === "failed"));
 +    if (away && agentInfo(notification) && !restored[id]) {
 +      awayLog = [...awayLog, id];
 +      if (!urgent) return;  // it waits for the "While you were away" card
@@ -321,14 +361,13 @@ index 368ef1b..3727e27 100644
 +      queue = [breathFor, ...queue];
 +      breathFor = "";
 +      _show(id);
-+    } else if (urgent && transientId !== ""
-+               && live[transientId]?.notification.urgency !== NotificationUrgency.Critical) {
++    } else if (urgent && transientId !== "" && yields(transientId)) {
 +      // Something that needs you doesn't wait behind a routine toast: that one steps back
 +      // to the head of the line and gets a fresh timer when it returns.
 +      queue = [transientId, ...queue];
 +      _show(id);
 +    } else if (urgent) {
-+      const firstNormal = queue.findIndex(q => live[q]?.notification.urgency !== NotificationUrgency.Critical);
++      const firstNormal = queue.findIndex(yields);
 +      const at = firstNormal < 0 ? queue.length : firstNormal;
 +      queue = [...queue.slice(0, at), id, ...queue.slice(at)];
 +    } else {
@@ -340,8 +379,8 @@ index 368ef1b..3727e27 100644
 +    const items = awayLog.map(id => _findById(activeNotifications, id)).filter(n => n);
 +    awayLog = [];
 +    if (!items.length) return;
-+    const rank = { needs: 0, failed: 1 };
-+    items.sort((a, b) => (rank[a.kind] ?? 2) - (rank[b.kind] ?? 2) || a.timestamp - b.timestamp);
++    const rank = { needs: 0, paused: 1, failed: 2 };
++    items.sort((a, b) => (rank[a.kind] ?? 3) - (rank[b.kind] ?? 3) || a.timestamp - b.timestamp);
 +    const id = "away:" + Date.now();
 +    activeNotifications = [{ id, kind: "away", appName: "Toasty|Toasty|||", summary: "While you were away",
 +      body: "", actions: [], suggestions: [], urgency: 1, timestamp: Date.now(),
@@ -367,6 +406,7 @@ index 368ef1b..3727e27 100644
 +
 +  function _show(id, calm) {
 +    const n = live[id]?.notification;
++    if (obsoleteEvent(_findById(activeNotifications, id))) { remove({id}); return; }
 +    if (!calm && n && n.urgency !== NotificationUrgency.Critical && agentInfo(n) && !breathMonitor.isIdle) {
 +      breathFor = id;
 +      breathSince = Date.now();
@@ -395,17 +435,30 @@ index 368ef1b..3727e27 100644
      }
    }
  
-@@ -105,7 +389,7 @@ Singleton {
+@@ -103,10 +425,15 @@ Singleton {
+       required property var notification
+       required property string notificationId
        property bool closed: false
++      property string revision: ""
  
        function refresh() {
 -        if (closed) return;
 +        if (closed || root.mergedInto[notificationId]) return;
          const data = root.snapshot(notification, notificationId);
++        if (root.obsoleteEvent(data)) { root.remove({ id: notificationId }); return; }
++        // The sender replaced it with a new event (same slot, new revision): it's news again.
++        const replaced = revision !== "" && data.eventRevision !== revision;
++        revision = data.eventRevision;
          root.activeNotifications = [data, ...root.activeNotifications.filter(n => n.id !== notificationId)];
          if (!notification.transient) {
-@@ -116,12 +400,17 @@ Singleton {
+           const updated = [data, ...root.historyNotifications.filter(n => n.id !== notificationId)];
+@@ -114,14 +441,22 @@ Singleton {
+           for (const removed of updated.slice(root.historyLimit)) root.remove(removed);
+         }
          popupTimeout.restart();
++        if (replaced && root.transientId !== notificationId && root.breathFor !== notificationId
++            && !root.queue.includes(notificationId) && !root.awayLog.includes(notificationId))
++          root._enqueue(notificationId);
        }
        function scheduleRefresh() { Qt.callLater(refresh); }
 +      function shown() { popupTimeout.restart(); }
@@ -423,9 +476,11 @@ index 368ef1b..3727e27 100644
          }
        }
        Connections {
-@@ -130,9 +419,19 @@ Singleton {
+@@ -129,10 +464,21 @@ Singleton {
+         function onSummaryChanged() { entry.scheduleRefresh(); }
          function onBodyChanged() { entry.scheduleRefresh(); }
          function onAppIconChanged() { entry.scheduleRefresh(); }
++        function onHintsChanged() { entry.scheduleRefresh(); }
          function onClosed(reason) {
 +          const id = entry.notificationId;
            entry.closed = true;
@@ -435,7 +490,7 @@ index 368ef1b..3727e27 100644
 +          // The sender took it down while it was on screen (answered in the session, or it
 +          // stopped waiting): say so for a moment instead of vanishing. Never claim an answer.
 +          if (root.transientId === id && reason === NotificationCloseReason.CloseRequested && !root.stamps[id]) {
-+            root.stamp(id, "Handled in the session");
++            root.stamp(id, "Request no longer available");
 +            // Not created from here: this object is destroyed below, and with it anything
 +            // that still needs its scope when the timer fires.
 +            root._removeAfter(id, 900);
@@ -445,7 +500,7 @@ index 368ef1b..3727e27 100644
            entry.destroy();
          }
        }
-@@ -149,6 +448,64 @@ Singleton {
+@@ -149,6 +495,64 @@ Singleton {
      return null;
    }
  
@@ -510,7 +565,7 @@ index 368ef1b..3727e27 100644
    function _identity(notification) {
      const raw = notification.desktopEntry || notification.appName || "unknown";
      return raw.toLowerCase().replace(/[^a-z0-9]+/g, "");
-@@ -175,6 +532,17 @@ Singleton {
+@@ -175,6 +579,17 @@ Singleton {
  
    function iconSource(notification) {
      const rawIcon = String(notification.appIcon || "");
@@ -528,7 +583,7 @@ index 368ef1b..3727e27 100644
      if (rawIcon.startsWith("file:") || rawIcon.startsWith("image:")
          || rawIcon.startsWith("qrc:"))
        return rawIcon;
-@@ -239,17 +607,37 @@ Singleton {
+@@ -239,17 +654,37 @@ Singleton {
    function togglePanel(outputName) {
      if (notificationCount === 0) return;
      if (panelOpen && panelOutputName === outputName) { closePanel(); return; }
@@ -567,7 +622,7 @@ index 368ef1b..3727e27 100644
      historyNotifications = historyNotifications.filter(n => n.id !== id);
      activeNotifications = activeNotifications.filter(n => n.id !== id);
      if (live[id]) live[id].notification.dismiss();
-@@ -257,20 +645,64 @@ Singleton {
+@@ -257,20 +692,64 @@ Singleton {
  
    function activate(notification) {
      if (!notification || !notification.id) return;
@@ -637,7 +692,7 @@ index 368ef1b..3727e27 100644
      closePanel();
    }
 diff --git c/notifications/ToastWindow.qml w/notifications/ToastWindow.qml
-index c86d2a5..b5861e4 100644
+index c86d2a5..2025878 100644
 --- c/notifications/ToastWindow.qml
 +++ w/notifications/ToastWindow.qml
 @@ -15,32 +15,41 @@ PanelWindow {
@@ -681,7 +736,7 @@ index c86d2a5..b5861e4 100644
        + (outputName || "unknown")
    WlrLayershell.exclusionMode: ExclusionMode.Ignore
 +  // Take the keyboard only when clicked, and only when there's something to type or press.
-+  WlrLayershell.keyboardFocus: agentToast && (agentCard.canReply || agentCard.actions.length > 0)
++  WlrLayershell.keyboardFocus: agentToast
 +      ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.None
  
    Behavior on reveal { Shell.Motion { duration: Notifications.Style.panelDuration } }
