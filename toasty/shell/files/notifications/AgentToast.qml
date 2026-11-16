@@ -1,18 +1,13 @@
 import QtQuick
+import QtQuick.Controls
+import QtQuick.Window
 import Quickshell
 import Quickshell.Io
 import Quickshell.Widgets
 import "." as Notifications
 import ".." as Shell
 
-// Agent toast, built to the Pond toast library spec (outputs/pond-toast-library).
-// Layout follows each layout's "Use for" rule:
-//   reply field          → 07 inset, 440px, 40px icon slot
-//   needs / failed       → 02 floating left, mascot 8px above the text column
-//   done / info, long    → 03 sitting centre, mascot sits 8px onto the card
-//   done / info          → 01 corner companion, mascot overlaps the top-left corner
-//   away summary         → 03 sitting, one line per agent event while you were away
-// 4px grid: padding 16 top/bottom, 20 left, 48 right (clears the close button).
+// A stable event card: identity, factual state, explicit actions, optional details.
 Item {
   id: root
   property var notification: ({})
@@ -36,9 +31,9 @@ Item {
   readonly property bool canReply: hasReply && !sent
   readonly property string kind: notification.kind || (notification.urgency === 2 ? "needs" : "info")
   readonly property bool away: kind === "away"
-  readonly property bool sticky: kind === "needs" || kind === "failed" || away
+  readonly property bool sticky: kind === "needs" || kind === "paused" || kind === "failed" || away
   // Sticky toasts carry a lasting edge in their status colour; Done stays light.
-  readonly property color edge: kind === "needs" ? "#FF8A00" : kind === "failed" ? "#DC2626" : "transparent"
+  readonly property color edge: kind === "needs" ? "#FF8A00" : kind === "failed" ? "#DC2626" : kind === "paused" ? "#8B6F47" : "transparent"
   // How it ended, shown for a moment before it leaves ("Allowed", "Denied", "Handled in the session").
   readonly property string stamp: Notifications.State.stamps[notification.id] || ""
   readonly property bool motion: !Notifications.State.reducedMotion
@@ -56,33 +51,58 @@ Item {
     }
     return lines.filter(v => v).join("\n");
   }
-  readonly property bool held: hover.hovered || field.activeFocus || field.text.length > 0
+  property bool expanded: false
+  readonly property bool approval: kind === "needs" && (actions.some(a => a.identifier === "allow") || notification.codeComplete === false)
+  readonly property bool navigable: !!(notification.openUrl || notification.windowId || notification.desktopEntry)
+  readonly property string eventTitle: kind === "done" ? "Turn finished"
+      : kind === "needs" ? (approval ? "Approval needed" : "Input needed")
+      : kind === "failed" ? "Couldn’t finish"
+      : kind === "paused" ? (notification.reason === "Interrupted" ? "Interrupted" : "Paused")
+      : String(notification.summary || "Update")
+  readonly property string supportingText: kind === "done" ? ""
+      : approval ? String(notification.summary || "Review this request")
+      : kind === "paused" && notification.reason ? notification.reason
+      : previewText(messageText)
+  readonly property string detailText: kind === "done" ? previewText(messageText) : messageText
+  readonly property bool held: hover.hovered || card.activeFocus || focusWithin(card)
+      || field.text.length > 0 || expanded
+  function focusWithin(item) {
+    if (item.activeFocus) return true;
+    for (const child of item.children) if (focusWithin(child)) return true;
+    return false;
+  }
+  // Convert only paired prose constructs. Code spans/fences remain byte-for-byte text.
+  function previewText(value) {
+    return String(value || "").split(/(```[\s\S]*?```|`[^`\n]+`)/g).map((part, i) => i % 2 ? part : part
+      .replace(/^ {0,3}#{1,6}\s+/gm, "")
+      .replace(/\[([^\]\n]+)\]\([^\s)]+\)/g, "$1")
+      .replace(/\*\*([^*\n]+)\*\*/g, "$1")
+      .replace(/__([^_\n]+)__/g, "$1")
+      .replace(/(^|\s)\*([^*\n]+)\*(?=\s|[.,!?]|$)/g, "$1$2")
+    ).join("");
+  }
   property string delivery: ""   // "", "sending", "sent", "failed"
   readonly property bool sent: delivery !== ""
   property real remaining: 1
 
-  readonly property string layout: away ? "sitting"
-      : hasReply ? "inset"
-      : sticky ? "floating"
-      : messageText.length > 90 ? "sitting" : "corner"
+  readonly property string layout: "inset"
 
   // Library tokens (light toast).
-  readonly property color surface: "#E4DFE6"
+  readonly property color surface: "#F0EDF2"
   readonly property color ink: "#211E24"
   readonly property color muted: "#5C5760"
   readonly property color line: Qt.rgba(0, 0, 0, 0.14)
   readonly property color hoverFill: Qt.rgba(0, 0, 0, 0.07)
-  readonly property color focusRing: "#CBA6F7"
+  readonly property color focusRing: "#655080"
 
   // Geometry. pad leaves room for the shadow; insets leave room for mascots that stick out.
   readonly property int pad: 12
-  readonly property int mascotSize: layout === "inset" ? 40 : 48
-  readonly property int leftInset: layout === "corner" ? 16 : 0
-  readonly property int topInset: layout === "corner" ? 20 : layout === "floating" ? mascotSize + 8
-      : layout === "sitting" ? mascotSize - 8 : 0
-  readonly property int cardWidth: layout === "inset" ? 440 : 384
-  readonly property int padLeft: layout === "corner" ? 44 : layout === "inset" ? 68 : 20
-  readonly property int cardHeight: Math.max(72, body.height + 32)
+  readonly property int mascotSize: 32
+  readonly property int leftInset: 0
+  readonly property int topInset: 0
+  readonly property int cardWidth: Math.min(380, Math.max(240, Screen.width - 56))
+  readonly property int padLeft: 16
+  readonly property int cardHeight: Math.max(100, body.height + 32)
 
   signal activated
   signal dismissed
@@ -97,6 +117,24 @@ Item {
              : { accent: "#8A8590", icon: "ghost.png" };
   }
 
+  function requestAction(identifier) {
+    if (!listening || notification.codeComplete === false) return;
+    if (!usesMarkers) { root.actionInvoked(identifier); return; }
+    actionProbe.identifier = identifier;
+    actionProbe.forId = shownId;
+    actionProbe.running = true;
+  }
+  Process {
+    id: actionProbe
+    property string identifier: ""
+    property string forId: ""
+    command: Notifications.State.aliveCheckCommand.concat([root.markerPath + ".alive"])
+    onExited: code => {
+      if (forId !== root.shownId) return;
+      if (code === 0) root.actionInvoked(identifier);
+      else root.listening = false;
+    }
+  }
   function send(text) {
     text = String(text || "").trim();
     if (!text || sent) return;
@@ -115,15 +153,20 @@ Item {
 
   // The same notification comes back as a fresh object whenever its text or icon changes;
   // only a different notification should clear what you're typing or a reply in flight.
+  property string shownEvent: ""
   property string shownId: ""
   onNotificationChanged: {
-    if ((notification || {}).id === shownId) return;
+    const event = String((notification || {}).id || "") + ":" + String((notification || {}).eventRevision || "");
+    if (event === shownEvent) return;
+    shownEvent = event;
     shownId = (notification || {}).id || "";
     // Anything still in flight belongs to the previous notification.
     probe.running = false;
+    actionProbe.running = false;
     confirm.running = false;
     sentClose.stop();
     delivery = "";
+    expanded = false;
     pickedUp = false;
     pickup.stop();
     listening = true;
@@ -136,7 +179,7 @@ Item {
     markerPath = Notifications.State.markerDir + "/" + (n.serverId || 0);
     if (motion) {
       if (kind === "done") hop.restart();
-      else if (kind === "failed") nudge.restart();
+
     }
     // Buttons and replies only mean something while the sender is still listening.
     if (usesMarkers && (n.hasInlineReply || (n.actions || []).some(a => a.identifier !== "default"
@@ -157,6 +200,11 @@ Item {
     property string forId: ""
     command: Notifications.State.aliveCheckCommand.concat([root.markerPath + ".alive"])
     onExited: code => { if (forId === root.shownId) root.listening = code === 0; }
+  }
+  Timer {
+    interval: 1000; repeat: true
+    running: root.visible && root.usesMarkers && root.listening && (root.actions.length > 0 || root.hasReply)
+    onTriggered: { probe.forId = root.shownId; probe.running = true; }
   }
   Process {
     id: confirm
@@ -184,12 +232,12 @@ Item {
 
     Shell.Shadow {
       anchors.fill: parent
-      cornerRadius: 20
-      shadows: [{ x: 0, y: 1, blur: 2, alpha: 0.25 }, { x: 0, y: 8, blur: 24, alpha: 0.35 }]
+      cornerRadius: 14
+      shadows: [{ x: 0, y: 2, blur: 12, alpha: 0.22 }]
     }
     Rectangle {
       anchors.fill: parent
-      radius: 20
+      radius: 14
       color: root.surface
       antialiasing: true
       border.width: root.sticky && !root.away ? 2 : 0
@@ -207,15 +255,17 @@ Item {
     Column {
       id: body
       x: root.padLeft
-      y: root.layout === "inset" ? 16 : Math.round((root.cardHeight - height) / 2)
-      width: root.cardWidth - x - 48
+      y: 16
+      width: root.cardWidth - 32
 
       Item {
-        width: parent.width; height: 20
+        width: parent.width - 32; height: 32
         Row {
+          x: 44
           spacing: 8
           anchors.verticalCenter: parent.verticalCenter
           Rectangle {
+            visible: false
             width: 8; height: 8; radius: 4
             anchors.verticalCenter: parent.verticalCenter
             color: root.look.accent
@@ -223,6 +273,7 @@ Item {
           Text {
             width: Math.max(0, Math.min(implicitWidth, time.x - 16 - 8))
             text: root.identity.name
+            textFormat: Text.PlainText
             color: root.ink; font.family: Shell.Theme.fontFamily
             font.pixelSize: 13; font.weight: Font.Bold; elide: Text.ElideRight
           }
@@ -235,6 +286,7 @@ Item {
           elide: Text.ElideLeft
           x: parent.width - width
           anchors.verticalCenter: parent.verticalCenter
+          textFormat: Text.PlainText
           readonly property string age: Notifications.State.relativeTimeLabel(root.notification.timestamp || Date.now())
           // Brought back after a shell reload: say how long it has been waiting.
           text: [root.notification.context,
@@ -247,10 +299,59 @@ Item {
       Item { width: 1; height: 2 }
       Text {
         width: parent.width
-        text: root.messageText
+        text: root.eventTitle
+        textFormat: Text.PlainText
         color: root.ink; font.family: Shell.Theme.fontFamily
-        font.pixelSize: 13; lineHeight: 20; lineHeightMode: Text.FixedHeight
-        wrapMode: Text.Wrap; maximumLineCount: 4; elide: Text.ElideRight
+        font.pixelSize: 15; font.weight: Font.DemiBold; lineHeight: 22; lineHeightMode: Text.FixedHeight
+        wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight
+      }
+
+      Text {
+        width: parent.width
+        visible: !root.away && root.supportingText !== ""
+        text: root.supportingText
+        textFormat: Text.PlainText
+        color: root.muted; font.family: Shell.Theme.fontFamily; font.pixelSize: 14
+        lineHeight: 20; lineHeightMode: Text.FixedHeight
+        wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight
+      }
+      Item { width: 1; height: 12; visible: navigation.visible }
+      Flow {
+        id: navigation
+        width: parent.width; spacing: 8
+        visible: !root.away && (root.navigable || root.detailText !== "" || root.code !== "")
+        Notifications.AgentButton {
+          visible: root.navigable
+          label: root.notification.openUrl || root.notification.windowId ? "Open session" : "Open app"
+          primary: true
+          ink: root.ink; surface: root.surface; line: root.line; hoverFill: root.hoverFill
+          onClicked: root.activated()
+        }
+        Notifications.AgentButton {
+          visible: root.detailText !== "" || root.code !== ""
+          label: root.expanded ? "Hide details" : "Show details"
+          ink: root.ink; surface: root.surface; line: root.line; hoverFill: root.hoverFill
+          onClicked: root.expanded = !root.expanded
+        }
+      }
+      Item { width: 1; height: 8; visible: root.expanded }
+      ScrollView {
+        visible: root.expanded
+        width: parent.width
+        height: Math.min(detailContent.implicitHeight + 16, Math.max(100, Screen.height * 0.4))
+        clip: true
+        TextArea {
+          id: detailContent
+          text: (root.kind === "done" ? "Reply preview\n\n" : "") + root.detailText
+              + (root.code ? "\n\n" + root.code : "")
+          textFormat: TextEdit.PlainText
+          readOnly: true; selectByMouse: true
+          wrapMode: TextEdit.Wrap
+          color: root.ink
+          font.family: root.code ? Shell.Theme.plexFontFamily : Shell.Theme.fontFamily
+          font.pixelSize: 14
+          background: Rectangle { color: root.hoverFill; radius: 8 }
+        }
       }
 
       // While you were away: one line per event, Waiting first. Each opens its agent;
@@ -281,17 +382,17 @@ Item {
               x: 8; anchors.verticalCenter: parent.verticalCenter
               width: 8; height: 8; radius: 4
               color: awayLine.modelData.kind === "needs" ? "#FF8A00"
-                   : awayLine.modelData.kind === "failed" ? "#DC2626" : "#2563EB"
+                   : awayLine.modelData.kind === "failed" ? "#DC2626" : awayLine.modelData.kind === "paused" ? "#8B6F47" : "#2563EB"
             }
             Text {
               x: 24; width: parent.width - 32
               anchors.verticalCenter: parent.verticalCenter
-              text: "<b>" + awayLine.modelData.name + "</b>"
+              text: awayLine.modelData.name
                     + (awayLine.modelData.context ? " · " + awayLine.modelData.context : "")
                     + " — " + (awayLine.modelData.kind === "needs" ? "Waiting"
-                               : awayLine.modelData.kind === "failed" ? "Failed" : "Done")
+                               : awayLine.modelData.kind === "failed" ? "Failed" : awayLine.modelData.kind === "paused" ? "Paused" : "Done")
                     + ": " + awayLine.modelData.text
-              textFormat: Text.StyledText
+              textFormat: Text.PlainText
               color: root.ink; font.family: Shell.Theme.fontFamily; font.pixelSize: 12
               elide: Text.ElideRight; maximumLineCount: 1
             }
@@ -307,9 +408,9 @@ Item {
       }
 
       // Code block: 8px below the question, monospace on a faint fill, up to 3 lines.
-      Item { width: 1; height: 8; visible: root.code !== "" }
+      Item { width: 1; height: 8; visible: root.code !== "" && !root.expanded }
       Rectangle {
-        visible: root.code !== ""
+        visible: root.code !== "" && !root.expanded
         width: parent.width
         height: codeText.height + 16
         radius: 8
@@ -319,6 +420,7 @@ Item {
           x: 12; y: 8
           width: parent.width - 24
           text: root.code
+          textFormat: Text.PlainText
           color: root.ink; font.family: Shell.Theme.plexFontFamily
           font.pixelSize: 12; lineHeight: 18; lineHeightMode: Text.FixedHeight
           wrapMode: Text.Wrap; maximumLineCount: 3; elide: Text.ElideRight
@@ -326,12 +428,14 @@ Item {
       }
       // Never let a cut-off command pass as the whole thing you're approving.
       readonly property string fullCaption: [codeText.truncated ? "Cut off: open the session to see all of it." : "",
+                                             root.notification.codeComplete === false ? "Full request available in session. Review there before answering." : "",
                                              root.caption].filter(v => v).join("\n")
       Item { width: 1; height: 8; visible: body.fullCaption !== "" }
       Text {
         visible: body.fullCaption !== ""
         width: parent.width
         text: body.fullCaption
+        textFormat: Text.PlainText
         color: root.muted; font.family: Shell.Theme.fontFamily
         font.pixelSize: 12; lineHeight: 16; lineHeightMode: Text.FixedHeight
         wrapMode: Text.Wrap; maximumLineCount: 3; elide: Text.ElideRight
@@ -343,6 +447,7 @@ Item {
         id: actionRow
         width: parent.width; spacing: 8
         visible: root.actions.length > 0 && !root.sent && !root.stamp && root.listening
+            && root.notification.codeComplete !== false && (!root.approval || !codeText.truncated || root.expanded)
         Repeater {
           model: root.actions
           delegate: Notifications.AgentButton {
@@ -352,7 +457,7 @@ Item {
             // Allow and Deny carry equal weight; "Always allow" is the quieter choice.
             primary: index === 0 || modelData.identifier === "deny"
             ink: root.ink; surface: root.surface; line: root.line; hoverFill: root.hoverFill
-            onClicked: root.actionInvoked(modelData.identifier)
+            onClicked: root.requestAction(modelData.identifier)
           }
         }
       }
@@ -384,7 +489,7 @@ Item {
         }
         Text {
           anchors.verticalCenter: parent.verticalCenter
-          text: root.stamp || "Sender gone — open the agent to answer."
+          text: root.stamp || "Request no longer available. Open the session."
           color: root.stamp ? root.ink : root.muted
           font.family: Shell.Theme.fontFamily; font.pixelSize: 12
           font.weight: root.stamp ? Font.DemiBold : Font.Normal
@@ -401,7 +506,7 @@ Item {
           model: root.suggestions
           delegate: Notifications.AgentButton {
             required property var modelData
-            label: modelData
+            label: "Send “" + modelData + "”"
             pill: true
             ink: root.ink; surface: root.surface; line: root.line; hoverFill: root.hoverFill
             onClicked: root.send(modelData)
@@ -524,7 +629,7 @@ Item {
     Rectangle {
       id: closeButton
       x: parent.width - 12 - width; y: body.y - 4
-      width: 28; height: 28; radius: 14
+      width: 32; height: 32; radius: 16
       color: closeArea.containsMouse || activeFocus ? root.hoverFill : "transparent"
       // Keyboard: Tab to it, then Enter, Space or Delete dismisses.
       activeFocusOnTab: true
@@ -574,21 +679,8 @@ Item {
     width: root.mascotSize; height: root.mascotSize
     transform: Translate { id: mascotShift }
     // Waiting breathes, slowly, so it reads as "still here" without asking twice.
-    SequentialAnimation on scale {
-      running: root.motion && root.kind === "needs" && root.visible
-      loops: Animation.Infinite
-      alwaysRunToEnd: true
-      NumberAnimation { to: 1.04; duration: 1400; easing.type: Easing.InOutSine }
-      NumberAnimation { to: 1; duration: 1400; easing.type: Easing.InOutSine }
-    }
-    x: root.layout === "corner" ? card.x - 16
-       : root.layout === "floating" ? card.x + 20
-       : root.layout === "sitting" ? card.x + (card.width - width) / 2
-       : card.x + 16
-    y: root.layout === "corner" ? card.y - 20
-       : root.layout === "floating" ? card.y - 8 - height
-       : root.layout === "sitting" ? card.y + 8 - height
-       : card.y + 16
+    x: card.x + 16
+    y: card.y + 16
     radius: root.look.avatar ? width / 2 : 0
     color: root.look.avatar ? "#F4F1F5" : "transparent"
     IconImage {

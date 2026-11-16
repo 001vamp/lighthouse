@@ -2,7 +2,7 @@
 """Send a Toasty agent toast, and optionally route your answer back to the agent.
 
 Identity:  --agent NAME [--provider P] [--model M] [--icon ICON]
-Kind:      --kind info|done|needs|failed   (needs/failed stay until handled)
+Kind:      --kind info|done|needs|paused|failed   (needs/paused/failed stay until handled)
 Code:      --code TEXT   shown in monospace under the title; the message becomes a caption
 Reply:     --reply [--placeholder TEXT] [--suggest TEXT ...]
            --expect CMD   expected foreground agent command (overrides name mapping)
@@ -22,14 +22,14 @@ Without --kitty, replies print as "reply:TEXT" and clicks as "action:default".
 Wire format: see PROTOCOL.md (fd.o Notify, app name "Toasty|name|provider|model|icon",
 x-toasty-* hints). Markers in $XDG_RUNTIME_DIR/toasty/markers prove this process is listening.
 """
-import argparse, json, os, signal, subprocess, sys, time
+import argparse, fcntl, hashlib, json, os, signal, subprocess, sys, time, uuid
 
 p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 p.add_argument('--agent', required=True, help='Agent or app name')
 p.add_argument('--provider', default='', help='Provider, only when known')
 p.add_argument('--model', default='', help='Model, only when known')
 p.add_argument('--icon', default='', help='Icon theme name or absolute path')
-p.add_argument('--kind', default='info', choices=['info', 'done', 'needs', 'failed'])
+p.add_argument('--kind', default='info', choices=['info', 'done', 'needs', 'paused', 'failed'])
 p.add_argument('--context', default='', help='Short label shown next to the time, e.g. the project')
 p.add_argument('--reply', action='store_true', help='Show an inline reply field')
 p.add_argument('--placeholder', default='', help='Reply field placeholder')
@@ -40,6 +40,11 @@ p.add_argument('--expect', default='', metavar='CMD', help='Expected foreground 
 p.add_argument('--desktop-entry', default='', help='App to focus on click when not in kitty')
 p.add_argument('--open', default='', metavar='URL', help='Link the shell opens on click, e.g. codex://threads/<id>')
 p.add_argument('--code', default='', help='Code shown in monospace under the title; the message becomes its caption')
+p.add_argument('--session', default='', help='Exact provider session ID')
+p.add_argument('--event', default='', help='Replacement slot within this session; requests need unique IDs')
+p.add_argument('--revision', default='', help='Exact provider event revision for duplicate callbacks')
+p.add_argument('--reason', default='', help='Explicit lifecycle reason, not inferred prose')
+p.add_argument('--incomplete-code', action='store_true', help='Request must be reviewed in the session')
 p.add_argument('--detach', action='store_true', help='Return immediately, keep listening in the background')
 p.add_argument('--skip-if-focused', action='store_true', help="Don't toast if you're already looking at the agent")
 p.add_argument('--withdraw-if-focused', action='store_true',
@@ -272,7 +277,7 @@ if can_reply:
     action_list += ['inline-reply', a.placeholder or f'Reply to {a.agent}…']
 
 hints = {
-    'urgency': GLib.Variant('y', 2 if a.kind in ('needs', 'failed') else 1),
+    'urgency': GLib.Variant('y', 2 if a.kind in ('needs', 'paused', 'failed') else 1),
     'x-toasty-kind': GLib.Variant('s', a.kind),
     # Otherwise the server closes the toast the moment you reply, before the shell can show
     # whether the reply was delivered. The shell dismisses it itself once it's handled.
@@ -296,6 +301,20 @@ if a.open:
 if a.code:
     hints['x-toasty-code'] = GLib.Variant('s', a.code)
 
+hints['x-toasty-code-complete'] = GLib.Variant('s', 'false' if a.incomplete_code else 'true')
+if a.reason:
+    hints['x-toasty-reason'] = GLib.Variant('s', a.reason)
+if a.session:
+    hints['x-toasty-session'] = GLib.Variant('s', a.session)
+    try:
+        with open(os.path.join(os.environ.get('XDG_RUNTIME_DIR', f'/tmp/toasty-{os.getuid()}'), 'toasty', 'sessions.json')) as source:
+            report = json.load(source).get(a.session, {})
+        if report.get('revision'):
+            hints['x-toasty-report-revision'] = GLib.Variant('s', report['revision'])
+    except (OSError, ValueError, TypeError):
+        pass
+hints['x-toasty-event-revision'] = GLib.Variant('s', a.revision or uuid.uuid4().hex)
+hints['x-toasty-event-time'] = GLib.Variant('s', str(int(time.time() * 1000)))
 loop = GLib.MainLoop()
 nid = None
 
@@ -334,15 +353,44 @@ if listening:
         bus.signal_subscribe('org.freedesktop.Notifications', 'org.freedesktop.Notifications', member,
                              '/org/freedesktop/Notifications', None, Gio.DBusSignalFlags.NONE, on_signal)
 
+# Serialize replacement-slot ownership. Never merge unrelated requests or sessions.
+cache_lock = None
+cache_path = None
+replacement = 0
 try:
+    if a.session and a.event:
+        cache_dir = os.path.join(os.environ.get('XDG_RUNTIME_DIR', f'/tmp/toasty-{os.getuid()}'), 'toasty', 'events')
+        os.makedirs(cache_dir, mode=0o700, exist_ok=True)
+        digest = hashlib.sha256(json.dumps([a.agent, a.session, a.event]).encode()).hexdigest()
+        cache_path = os.path.join(cache_dir, digest + '.json')
+        cache_lock = open(cache_path + '.lock', 'a')
+        fcntl.flock(cache_lock, fcntl.LOCK_EX)
+        owner = bus.call_sync('org.freedesktop.DBus', '/org/freedesktop/DBus', 'org.freedesktop.DBus',
+            'GetNameOwner', GLib.Variant('(s)', ('org.freedesktop.Notifications',)),
+            GLib.VariantType('(s)'), Gio.DBusCallFlags.NONE, 2000, None).unpack()[0]
+        try:
+            with open(cache_path) as source:
+                previous = json.load(source)
+        except (OSError, ValueError):
+            previous = {}
+        if previous.get('owner') == owner:
+            if a.revision and previous.get('revision') == a.revision:
+                sys.exit(0)
+            replacement = int(previous.get('id', 0))
     nid = bus.call_sync('org.freedesktop.Notifications', '/org/freedesktop/Notifications',
                         'org.freedesktop.Notifications', 'Notify',
-                        GLib.Variant('(susssasa{sv}i)', ('Toasty|' + '|'.join(fields), 0, a.icon,
+                        GLib.Variant('(susssasa{sv}i)', ('Toasty|' + '|'.join(fields), replacement, a.icon,
                                                          a.title, a.message, action_list, hints, -1)),
                         GLib.VariantType('(u)'), Gio.DBusCallFlags.NONE, 5000, None).unpack()[0]
-except GLib.Error as e:
-    log(f'Notify failed: {e.message}')
-    sys.exit(f'toasty-notify: {e.message}')
+    if cache_path:
+        with open(cache_path, 'w') as output:
+            json.dump({'owner': owner, 'id': nid, 'revision': a.revision}, output)
+except (GLib.Error, OSError, ValueError) as e:
+    log(f'Notify failed: {e}')
+    sys.exit(f'toasty-notify: {e}')
+finally:
+    if cache_lock:
+        cache_lock.close()
 
 def withdraw():
     """Take our toast down: the question it asks no longer has anyone waiting on the answer."""

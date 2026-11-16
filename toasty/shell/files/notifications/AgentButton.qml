@@ -28,12 +28,12 @@ Rectangle {
     radius: root.radius + 3
     color: "transparent"
     border.width: 2
-    border.color: "#CBA6F7"
+    border.color: "#655080"
     visible: root.activeFocus
   }
 
   implicitWidth: text.implicitWidth + 24
-  implicitHeight: 28
+  implicitHeight: 32
   radius: pill ? 14 : 8
   color: primary ? ink : pointer.containsMouse ? hoverFill : "transparent"
   border.width: primary ? 0 : 1
@@ -47,6 +47,7 @@ Rectangle {
     id: text
     anchors.centerIn: parent
     text: root.label
+    textFormat: Text.PlainText
     color: root.primary ? root.surface : root.ink
     font.family: Shell.Theme.fontFamily
     font.pixelSize: 12; font.weight: Font.DemiBold
@@ -56,6 +57,6 @@ Rectangle {
     anchors.fill: parent
     hoverEnabled: true
     cursorShape: Qt.PointingHandCursor
-    onClicked: root.clicked()
+    onClicked: { root.forceActiveFocus(); root.clicked(); }
   }
 }
