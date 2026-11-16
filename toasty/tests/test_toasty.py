@@ -207,8 +207,9 @@ class Hooks(Env):
 
     def test_codex_status_lifecycle(self):
         base = {'session_id': 't1', 'cwd': '/work/api'}
-        for event, state in (('UserPromptSubmit', 'working'), ('PermissionRequest', 'waiting'),
-                             ('PostToolUse', 'working'), ('Stop', 'done')):
+        for event, state in (('SessionStart', 'ready'), ('UserPromptSubmit', 'working'), ('PermissionRequest', 'waiting'),
+                             ('PostToolUse', 'working'), ('Interrupt', 'paused'), ('UserPromptSubmit', 'working'),
+                             ('Stop', 'done')):
             self.run_hook('toasty-codex-status', {**base, 'hook_event_name': event})
             self.assertEqual(self.sessions()['t1']['state'], state, event)
         self.assertEqual(self.sessions()['t1']['open'], 'codex://threads/t1')
@@ -263,9 +264,15 @@ class Hooks(Env):
     def test_claude_app_session_states(self):
         env = dict(self.env, CLAUDE_CODE_DESKTOP_APP_VERSION='1')
         base = {'session_id': 'c1', 'cwd': '/work/lo'}
-        self.run_hook('toasty-claude-hook', {**base, 'hook_event_name': 'UserPromptSubmit'}, env)
+        self.run_hook('toasty-claude-hook', {**base, 'hook_event_name': 'SessionStart'}, env)
+        self.assertEqual(self.sessions()['c1']['state'], 'ready')
+        self.run_hook('toasty-claude-hook', {**base, 'hook_event_name': 'UserPromptSubmit', 'prompt': 'Fix login'}, env)
         self.assertEqual(self.sessions()['c1'], {**self.sessions()['c1'], 'agent': 'Claude Code', 'state': 'working',
-                                                 'app': 'com.anthropic.Claude', 'project': 'lo'})
+                                                 'app': 'com.anthropic.Claude', 'project': 'lo', 'task': 'Fix login'})
+        self.run_hook('toasty-claude-hook', {**base, 'hook_event_name': 'Stop'}, env)
+        self.assertTrue(wait_for(lambda: self.calls('Notify')))
+        hints = self.calls('Notify')[-1]['hints']
+        self.assertEqual((hints['x-toasty-session'], hints['x-toasty-report-revision']), ('c1', self.sessions()['c1']['revision']))
         self.run_hook('toasty-claude-hook', {**base, 'hook_event_name': 'SessionEnd'}, env)
         self.assertNotIn('c1', self.sessions())
 
