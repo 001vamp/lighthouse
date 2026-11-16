@@ -15,6 +15,8 @@ Never blocks Claude: toasty-notify is started detached and this always exits 0.
 """
 import json, os, re, subprocess, sys, time
 
+from toastylib import other_app_sessions
+
 NOTIFY = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toasty-notify')
 RUNTIME = os.path.join(os.environ.get('XDG_RUNTIME_DIR') or f'/tmp/toasty-{os.getuid()}', 'toasty')
 os.makedirs(RUNTIME, mode=0o700, exist_ok=True)
@@ -117,17 +119,6 @@ def set_session(data, project, state, only_from=None):
         with open(tmp, 'w') as f:
             json.dump(sessions, f)
         os.replace(tmp, SESSIONS)
-
-def other_app_sessions(session, app):
-    """Is another session of this desktop app active in the last hour? Then the app having focus
-    doesn't mean you're looking at this session, so it shouldn't silence the toast."""
-    try:
-        with open(os.path.join(RUNTIME, 'sessions.json')) as f:
-            sessions = json.load(f)
-    except (OSError, ValueError):
-        return False
-    return any(sid != session and s.get('app') == app and time.time() - s.get('time', 0) < 3600
-               for sid, s in sessions.items())
 
 def notify(data, *args):
     cmd = [NOTIFY, '--agent', 'Claude Code', '--provider', 'Anthropic', '--detach']

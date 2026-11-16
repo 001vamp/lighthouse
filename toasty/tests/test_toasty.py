@@ -236,10 +236,7 @@ class Hooks(Env):
         self.assertEqual(self.sessions()['saved']['state'], 'done')
 
     def test_codex_in_a_terminal_is_not_the_app(self):
-        codex = os.path.join(self.fakebin, 'codex')
-        with open(codex, 'w') as f:
-            f.write('#!/bin/sh\n"$@"\ntrue\n')
-        os.chmod(codex, 0o755)
+        codex = self.fake_codex()
         payload = json.dumps({'session_id': 't', 'cwd': '/w', 'hook_event_name': 'UserPromptSubmit'})
         subprocess.run([codex, os.path.join(BIN, 'toasty-codex-status')], input=payload, text=True, env=self.env)
         self.assertEqual(self.sessions()['t']['app'], '')

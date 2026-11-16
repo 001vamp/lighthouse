@@ -11,24 +11,8 @@ import sys
 import tempfile
 import time
 
+from toastylib import in_desktop_app
 
-def in_desktop_app():
-    """False only when a terminal Codex started us: the ChatGPT app's Codex runs as app-server."""
-    pid = os.getppid()
-    for _ in range(8):
-        try:
-            with open(f'/proc/{pid}/cmdline', 'rb') as f:
-                argv = f.read().decode('utf-8', 'replace').split('\0')
-            with open(f'/proc/{pid}/stat') as f:
-                parent = int(f.read().rpartition(')')[2].split()[1])
-        except (OSError, ValueError, IndexError):
-            return True
-        if 'codex' in (os.path.basename(a) for a in argv[:2]):
-            return 'app-server' in argv or 'exec-server' in argv
-        if parent <= 1:
-            return True
-        pid = parent
-    return True
 
 def update(data):
     sid = data.get('thread-id') or data.get('session_id')

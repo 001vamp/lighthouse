@@ -34,6 +34,7 @@ SHELL = os.path.join(ROOT, 'shell')
 
 HELPERS = ['toasty-notify', 'toasty-claude-hook', 'toasty-claude-permission',
            'toasty-codex-notify', 'toasty-codex-status', 'toasty-codex-permission']
+LIBS = ['toastylib.py']  # imported by the helpers, so it goes next to them
 LEGACY = re.compile(r'/pond-(claude|codex)-[a-z]+$|/pond-agent-notify$')
 
 def path(name):
@@ -274,7 +275,7 @@ def install_registry(link):
 
 def install(args):
     os.makedirs(BIN, exist_ok=True)
-    for name in HELPERS + ['toasty']:
+    for name in HELPERS + LIBS + ['toasty']:
         src, dest = os.path.join(HERE, name), path(name)
         if os.path.lexists(dest):
             os.remove(dest)
@@ -300,7 +301,7 @@ def install(args):
     print('\nNext: run `toasty doctor --toast`.')
 
 def uninstall(args):
-    for name in HELPERS + ['toasty']:
+    for name in HELPERS + LIBS + ['toasty']:
         if os.path.lexists(path(name)):
             os.remove(path(name))
     registry = os.path.join(DATA, 'agents.json')
