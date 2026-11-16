@@ -55,7 +55,7 @@ Item {
   readonly property bool approval: kind === "needs" && (actions.some(a => a.identifier === "allow") || notification.codeComplete === false)
   readonly property bool navigable: !!(notification.openUrl || notification.windowId || notification.desktopEntry)
   readonly property string eventTitle: kind === "done" ? "Turn finished"
-      : kind === "needs" ? (approval ? "Approval needed" : "Input needed")
+      : kind === "needs" ? (approval || notification.reason === "approval" ? "Approval needed" : "Input needed")
       : kind === "failed" ? "Couldn’t finish"
       : kind === "paused" ? (notification.reason === "Interrupted" ? "Interrupted" : "Paused")
       : String(notification.summary || "Update")
@@ -84,8 +84,6 @@ Item {
   property string delivery: ""   // "", "sending", "sent", "failed"
   readonly property bool sent: delivery !== ""
   property real remaining: 1
-
-  readonly property string layout: "inset"
 
   // Library tokens (light toast).
   readonly property color surface: "#F0EDF2"
@@ -177,10 +175,7 @@ Item {
     const n = notification || {};
     usesMarkers = /^(Toasty|PondAgent)\|/.test(String(n.appName || "")) && !!n.serverId;
     markerPath = Notifications.State.markerDir + "/" + (n.serverId || 0);
-    if (motion) {
-      if (kind === "done") hop.restart();
-
-    }
+    if (motion && kind === "done") hop.restart();
     // Buttons and replies only mean something while the sender is still listening.
     if (usesMarkers && (n.hasInlineReply || (n.actions || []).some(a => a.identifier !== "default"
                                                                     && a.identifier !== "inline-reply"))) {
@@ -224,7 +219,6 @@ Item {
 
   Item {
     id: card
-    transform: Translate { id: cardShift }
     x: root.pad + root.leftInset
     y: root.pad + root.topInset
     width: root.cardWidth
@@ -264,12 +258,6 @@ Item {
           x: 44
           spacing: 8
           anchors.verticalCenter: parent.verticalCenter
-          Rectangle {
-            visible: false
-            width: 8; height: 8; radius: 4
-            anchors.verticalCenter: parent.verticalCenter
-            color: root.look.accent
-          }
           Text {
             width: Math.max(0, Math.min(implicitWidth, time.x - 16 - 8))
             text: root.identity.name
@@ -343,7 +331,7 @@ Item {
         TextArea {
           id: detailContent
           text: (root.kind === "done" ? "Reply preview\n\n" : "") + root.detailText
-              + (root.code ? "\n\n" + root.code : "")
+              + (root.notification.details || root.code ? "\n\n" + (root.notification.details || root.code) : "")
           textFormat: TextEdit.PlainText
           readOnly: true; selectByMouse: true
           wrapMode: TextEdit.Wrap
@@ -427,8 +415,7 @@ Item {
         }
       }
       // Never let a cut-off command pass as the whole thing you're approving.
-      readonly property string fullCaption: [codeText.truncated ? "Cut off: open the session to see all of it." : "",
-                                             root.notification.codeComplete === false ? "Full request available in session. Review there before answering." : "",
+      readonly property string fullCaption: [root.notification.codeComplete === false ? "Full request available in session. Review there before answering." : "",
                                              root.caption].filter(v => v).join("\n")
       Item { width: 1; height: 8; visible: body.fullCaption !== "" }
       Text {
@@ -541,6 +528,7 @@ Item {
           Text {
             anchors.verticalCenter: parent.verticalCenter
             text: root.notification.inlineReplyPlaceholder || ("Reply to " + root.identity.name + "…")
+            textFormat: Text.PlainText
             visible: field.text === ""
             color: root.muted; font: field.font
           }
@@ -601,6 +589,7 @@ Item {
               : root.delivery === "failed" ? "Couldn’t deliver to " + root.identity.name
               : root.pickedUp ? "Sent · " + root.identity.name + " is on it"
               : "Sent to " + root.identity.name
+          textFormat: Text.PlainText
           color: root.delivery === "failed" ? root.ink : root.muted
           font.family: Shell.Theme.fontFamily; font.pixelSize: 12
           font.weight: root.delivery === "failed" ? Font.DemiBold : Font.Normal
@@ -673,7 +662,7 @@ Item {
     }
   }
 
-  // Mascot, positioned relative to the card per layout.
+  // Mascot, inset at the card's top left.
   ClippingRectangle {
     id: mascot
     width: root.mascotSize; height: root.mascotSize
@@ -690,17 +679,11 @@ Item {
     }
   }
 
-  // Done: the mascot hops once. Failed: the card nudges once. Both skipped with reduced motion.
+  // Done: the mascot hops once, skipped with reduced motion.
   SequentialAnimation {
     id: hop
     NumberAnimation { target: mascotShift; property: "y"; to: -8; duration: 160; easing.type: Easing.OutQuad }
     NumberAnimation { target: mascotShift; property: "y"; to: 0; duration: 260; easing.type: Easing.OutBack }
-  }
-  SequentialAnimation {
-    id: nudge
-    NumberAnimation { target: cardShift; property: "x"; to: -4; duration: 60 }
-    NumberAnimation { target: cardShift; property: "x"; to: 4; duration: 90 }
-    NumberAnimation { target: cardShift; property: "x"; to: 0; duration: 120; easing.type: Easing.OutBack }
   }
 
   NumberAnimation {

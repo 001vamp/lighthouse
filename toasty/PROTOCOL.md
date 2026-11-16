@@ -20,6 +20,7 @@ Toasty|<agent name>|<provider>|<model>|<icon>
 | `x-toasty-kind` | string | `info`, `done`, `needs`, `paused` or `failed`. `needs`, `paused` and `failed` are sticky: they never time out. |
 | `x-toasty-context` | string | A short label shown beside the time, usually the project folder. |
 | `x-toasty-code` | string | Text shown in monospace under the title, e.g. the exact command waiting for approval. The body becomes its caption. |
+| `x-toasty-details` | string | Full text behind "Show details", e.g. the complete request input. Without it, details show the code. |
 | `x-toasty-suggestions` | string | Newline-separated one-click replies. |
 | `x-toasty-window` | string | The compositor window id of the agent's terminal (niri today), so a click can raise it even after the sender has exited. |
 | `x-toasty-open` | string | A link to open on click instead, e.g. `codex://threads/<id>`. |
@@ -68,7 +69,8 @@ Hooks report agent state for the dock in `$XDG_RUNTIME_DIR/toasty/`:
 fields. They become `x-toasty-session`, `x-toasty-event-revision`,
 `x-toasty-report-revision`, `x-toasty-event-time`, and `x-toasty-reason` hints.
 The report revision is read from the local session registry when available.
-Event time is milliseconds since the epoch. Title refreshes do not write reports.
+Event time is milliseconds since the epoch. A `needs` toast with reason `approval`
+is a permission prompt even when it carries no buttons.
 
 An event replacement slot is scoped by agent, exact session, and event key.
 Completion producers use the `completion` slot. Approval producers use an exact
@@ -78,14 +80,18 @@ IDs to the notification server's D-Bus owner. A repeated nonempty event revision
 is ignored. New revisions replace the slot and reset the toast's interaction state.
 Neither visible text nor a folder name identifies an event.
 
-`--incomplete-code` sets `x-toasty-code-complete=false`. Permission producers send
-full JSON tool input up to 16 KiB. Beyond that limit, they send an explicit review
-notice and omit all approval actions. The shell hides approval actions for a
-visually truncated request until its full supplied content is expanded. Dynamic
-text uses plain text, including away rows, code, context, and captions.
+Permission producers send a one-line summary as `x-toasty-code` and the full JSON
+tool input, up to 16 KiB, as `x-toasty-details`. Beyond that limit they send an
+explicit review notice, set `x-toasty-code-complete=false` (`--incomplete-code`),
+and omit all approval actions. The shell hides approval actions for a visually
+truncated summary until details are expanded. Dynamic text uses plain text,
+including away rows, code, context, and captions.
 
-The shell retires linked completion and waiting events after an authoritative new
-registry revision supersedes them. It checks request receiver markers periodically
-and again before a button action. Without matching report metadata it does not
-infer lifecycle state. Closing, opening, timing out, or focusing a toast supplies
-no permission decision. Desktop app focus does not prove exact-session focus.
+The shell retires a linked event once a new registry revision supersedes it:
+completion when the session works or waits again, a request when it works, ends,
+pauses or fails, and a pause or failure when it works, waits or finishes. A request
+may step in front of a sticky paused or failed toast; those return to the head of
+the line. The shell checks request receiver markers periodically and again before
+a button action. Without matching report metadata it does not infer lifecycle
+state. Closing, opening, timing out, or focusing a toast supplies no permission
+decision. Desktop app focus does not prove exact-session focus.

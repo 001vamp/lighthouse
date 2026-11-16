@@ -59,7 +59,7 @@ index 73add93..f73913c 100644
    readonly property real previewOpacity: inlineAmount >= 0.54 ? 1 : 0
    readonly property var notification: Notifications.State.currentTransient
 diff --git c/notifications/State.qml w/notifications/State.qml
-index 368ef1b..493d210 100644
+index 368ef1b..504726f 100644
 --- c/notifications/State.qml
 +++ w/notifications/State.qml
 @@ -3,6 +3,7 @@ import QtQuick
@@ -160,7 +160,7 @@ index 368ef1b..493d210 100644
    property bool historyWritable: false
  
    SystemClock {
-@@ -75,24 +153,260 @@ Singleton {
+@@ -75,24 +153,268 @@ Singleton {
      bodySupported: true
      bodyMarkupSupported: false
      imageSupported: false
@@ -170,7 +170,7 @@ index 368ef1b..493d210 100644
 +    // on click (e.g. a Codex thread), and code to show in monospace (e.g. a command to approve).
 +    // The x-pond-* names are the same hints from before the rename, still accepted.
 +    extraHints: ["x-toasty-kind", "x-toasty-suggestions", "x-toasty-context", "x-toasty-window",
-+                 "x-toasty-open", "x-toasty-code", "x-toasty-code-complete", "x-toasty-reason",
++                 "x-toasty-open", "x-toasty-code", "x-toasty-details", "x-toasty-code-complete", "x-toasty-reason",
 +                 "x-toasty-session", "x-toasty-report-revision", "x-toasty-event-time", "x-toasty-event-revision",
 +                 "x-pond-kind", "x-pond-suggestions", "x-pond-context", "x-pond-window", "x-pond-open",
 +                 "x-pond-code"]
@@ -193,6 +193,7 @@ index 368ef1b..493d210 100644
 +      windowId: String(hint("window")),
 +      openUrl: String(hint("open")),
 +      code: String(hint("code")),
++      details: String(hint("details")),
 +      codeComplete: String(hint("code-complete")) !== "false",
 +      reason: String(hint("reason")),
 +      eventRevision: String(hint("event-revision")),
@@ -220,6 +221,8 @@ index 368ef1b..493d210 100644
 +    const report = sessionReports[n.sessionKey];
 +    if (!report || report.revision === n.reportRevision) return false;
 +    if (n.kind === "done") return report.state === "working" || report.state === "waiting";
++    // A pause or failure is over once the session works, asks or finishes again.
++    if (n.kind === "paused" || n.kind === "failed") return ["working", "waiting", "done"].includes(report.state);
 +    return n.kind === "needs" && ["working", "done", "paused", "failed"].includes(report.state);
 +  }
 +  function retireObsoleteEvents() {
@@ -334,6 +337,12 @@ index 368ef1b..493d210 100644
 +  function _enqueue(id) {
 +    const notification = live[id].notification;
 +    const urgent = notification.urgency === NotificationUrgency.Critical;
++    // Who this one may step in front of: anything routine and, for a request, a sticky
++    // paused or failed card that only reports.
++    const kindOf = q => { const h = live[q]?.notification.hints || {}; return String(h["x-toasty-kind"] || h["x-pond-kind"] || ""); };
++    const request = urgent && kindOf(id) === "needs";
++    const yields = q => live[q]?.notification.urgency !== NotificationUrgency.Critical
++        || (request && (kindOf(q) === "paused" || kindOf(q) === "failed"));
 +    if (away && agentInfo(notification) && !restored[id]) {
 +      awayLog = [...awayLog, id];
 +      if (!urgent) return;  // it waits for the "While you were away" card
@@ -352,14 +361,13 @@ index 368ef1b..493d210 100644
 +      queue = [breathFor, ...queue];
 +      breathFor = "";
 +      _show(id);
-+    } else if (urgent && transientId !== ""
-+               && live[transientId]?.notification.urgency !== NotificationUrgency.Critical) {
++    } else if (urgent && transientId !== "" && yields(transientId)) {
 +      // Something that needs you doesn't wait behind a routine toast: that one steps back
 +      // to the head of the line and gets a fresh timer when it returns.
 +      queue = [transientId, ...queue];
 +      _show(id);
 +    } else if (urgent) {
-+      const firstNormal = queue.findIndex(q => live[q]?.notification.urgency !== NotificationUrgency.Critical);
++      const firstNormal = queue.findIndex(yields);
 +      const at = firstNormal < 0 ? queue.length : firstNormal;
 +      queue = [...queue.slice(0, at), id, ...queue.slice(at)];
 +    } else {
@@ -427,7 +435,7 @@ index 368ef1b..493d210 100644
      }
    }
  
-@@ -105,8 +419,9 @@ Singleton {
+@@ -105,8 +427,9 @@ Singleton {
        property bool closed: false
  
        function refresh() {
@@ -438,7 +446,7 @@ index 368ef1b..493d210 100644
          root.activeNotifications = [data, ...root.activeNotifications.filter(n => n.id !== notificationId)];
          if (!notification.transient) {
            const updated = [data, ...root.historyNotifications.filter(n => n.id !== notificationId)];
-@@ -116,12 +431,17 @@ Singleton {
+@@ -116,12 +439,17 @@ Singleton {
          popupTimeout.restart();
        }
        function scheduleRefresh() { Qt.callLater(refresh); }
@@ -457,7 +465,7 @@ index 368ef1b..493d210 100644
          }
        }
        Connections {
-@@ -130,9 +450,19 @@ Singleton {
+@@ -130,9 +458,19 @@ Singleton {
          function onBodyChanged() { entry.scheduleRefresh(); }
          function onAppIconChanged() { entry.scheduleRefresh(); }
          function onClosed(reason) {
@@ -479,7 +487,7 @@ index 368ef1b..493d210 100644
            entry.destroy();
          }
        }
-@@ -149,6 +479,64 @@ Singleton {
+@@ -149,6 +487,64 @@ Singleton {
      return null;
    }
  
@@ -544,7 +552,7 @@ index 368ef1b..493d210 100644
    function _identity(notification) {
      const raw = notification.desktopEntry || notification.appName || "unknown";
      return raw.toLowerCase().replace(/[^a-z0-9]+/g, "");
-@@ -175,6 +563,17 @@ Singleton {
+@@ -175,6 +571,17 @@ Singleton {
  
    function iconSource(notification) {
      const rawIcon = String(notification.appIcon || "");
@@ -562,7 +570,7 @@ index 368ef1b..493d210 100644
      if (rawIcon.startsWith("file:") || rawIcon.startsWith("image:")
          || rawIcon.startsWith("qrc:"))
        return rawIcon;
-@@ -239,17 +638,37 @@ Singleton {
+@@ -239,17 +646,37 @@ Singleton {
    function togglePanel(outputName) {
      if (notificationCount === 0) return;
      if (panelOpen && panelOutputName === outputName) { closePanel(); return; }
@@ -601,7 +609,7 @@ index 368ef1b..493d210 100644
      historyNotifications = historyNotifications.filter(n => n.id !== id);
      activeNotifications = activeNotifications.filter(n => n.id !== id);
      if (live[id]) live[id].notification.dismiss();
-@@ -257,20 +676,64 @@ Singleton {
+@@ -257,20 +684,64 @@ Singleton {
  
    function activate(notification) {
      if (!notification || !notification.id) return;

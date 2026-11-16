@@ -40,6 +40,7 @@ p.add_argument('--expect', default='', metavar='CMD', help='Expected foreground 
 p.add_argument('--desktop-entry', default='', help='App to focus on click when not in kitty')
 p.add_argument('--open', default='', metavar='URL', help='Link the shell opens on click, e.g. codex://threads/<id>')
 p.add_argument('--code', default='', help='Code shown in monospace under the title; the message becomes its caption')
+p.add_argument('--details', default='', help='Full text behind Show details, e.g. the complete request')
 p.add_argument('--session', default='', help='Exact provider session ID')
 p.add_argument('--event', default='', help='Replacement slot within this session; requests need unique IDs')
 p.add_argument('--revision', default='', help='Exact provider event revision for duplicate callbacks')
@@ -300,6 +301,8 @@ if a.open:
     hints['x-toasty-open'] = GLib.Variant('s', a.open)
 if a.code:
     hints['x-toasty-code'] = GLib.Variant('s', a.code)
+if a.details:
+    hints['x-toasty-details'] = GLib.Variant('s', a.details)
 
 hints['x-toasty-code-complete'] = GLib.Variant('s', 'false' if a.incomplete_code else 'true')
 if a.reason:
