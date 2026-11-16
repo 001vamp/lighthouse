@@ -85,7 +85,8 @@ def main():
             cmd += ['--open', f"codex://threads/{data['session_id']}"]
         if not other_app_sessions(data.get('session_id'), 'chatgpt'):
             cmd.append('--skip-if-focused')
-        subprocess.run(cmd + ['--code', detail or tool, title, 'Approve it in ChatGPT.'],
+        subprocess.run(cmd + ['--reason', 'approval', '--code', detail or tool, '--details', full,
+                              title, 'Approve it in ChatGPT.'],
                        stdin=subprocess.DEVNULL, timeout=10)
         return
 

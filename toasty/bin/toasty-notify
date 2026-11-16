@@ -260,6 +260,15 @@ def prune_markers():
 def marker(suffix):
     return os.path.join(MARKERS, f'{nid}.{suffix}')
 
+def owned():
+    """A replacement in the same slot takes over the id and its .alive marker: after that,
+    this helper must not answer, withdraw, or clear markers for it."""
+    try:
+        with open(marker('alive')) as f:
+            return f.read().strip() == str(os.getpid())
+    except OSError:
+        return False
+
 def clear_markers():
     for suffix in ('alive', 'delivered'):
         try:
@@ -324,6 +333,9 @@ nid = None
 def on_signal(_conn, _sender, _path, _iface, member, params):
     args = params.unpack()
     if args[0] != nid:
+        return
+    if not owned():
+        loop.quit()
         return
     if member == 'ActionInvoked':
         emit(f'action:{args[1]}')
@@ -405,7 +417,8 @@ def withdraw():
         pass
 
 def give_up():
-    withdraw()
+    if owned():
+        withdraw()
     loop.quit()
     return False
 
@@ -416,6 +429,8 @@ if listening:
     with open(marker('alive'), 'w') as f:
         f.write(str(os.getpid()))
     GLib.timeout_add_seconds(a.timeout, give_up)
+    if cache_path:  # a replaced helper exits instead of idling until its timeout
+        GLib.timeout_add_seconds(2, lambda: owned() or loop.quit())
     if a.withdraw_if_focused:
         def check_focus():
             if not already_focused():
@@ -435,4 +450,5 @@ if listening:
     try:
         loop.run()
     finally:
-        clear_markers()
+        if owned():
+            clear_markers()
