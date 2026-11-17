@@ -20,7 +20,7 @@ Toasty|<agent name>|<provider>|<model>|<icon>
 | `x-toasty-kind` | string | `info`, `done`, `needs`, `paused` or `failed`. `needs`, `paused` and `failed` are sticky: they never time out. |
 | `x-toasty-context` | string | A short label shown beside the time, usually the project folder. |
 | `x-toasty-code` | string | Text shown in monospace under the title, e.g. the exact command waiting for approval. The body becomes its caption. |
-| `x-toasty-details` | string | Full text behind "Show details", e.g. the complete request input. Without it, details show the code. |
+| `x-toasty-details` | string | Full text behind "More", e.g. the complete request input. Without it, "More" shows the whole message or code. |
 | `x-toasty-suggestions` | string | Newline-separated one-click replies. |
 | `x-toasty-window` | string | The compositor window id of the agent's terminal (niri today), so a click can raise it even after the sender has exited. |
 | `x-toasty-open` | string | A link to open on click instead, e.g. `codex://threads/<id>`. |
@@ -52,7 +52,8 @@ An agent's desktop app may send its own notification for the same moment as a To
 
 Hooks report agent state for the dock in `$XDG_RUNTIME_DIR/toasty/`:
 
-- **`sessions.json`** holds desktop-app sessions, which have no terminal title to read: `{"<session id>": {"agent", "project", "state", "time", "app", "open"?}}`. `state` is `working`, `waiting`, `done` or `failed`. Writers lock `sessions.json.lock` with `flock` and replace the file in one step.
+- **`sessions.json`** holds desktop-app sessions, which have no terminal title to read: `{"<session id>": {"agent", "project", "state", "time", "app", "open"?, "t3"?}}`. `state` is `working`, `waiting`, `done` or `failed`. Writers lock `sessions.json.lock` with `flock` and replace the file in one step.
+- **`t3`** is set for sessions T3 Code started (`T3CODE_THREAD_ID` in the hook's environment): `{"thread", "open", "job"?}`, looked up once with `t3 thread show`. `open` is the thread's `t3code://` link. `job` (`{"id", "title", "open"}`) is the orchestrator thread that spawned the session. The dock folds every session with the same `job.id`, plus the orchestrator's own session, into one job row, and shows a child of its own only while it needs you. `{}` means the lookup failed. Codex sessions in T3 don't get one yet: T3 runs one Codex server for all its threads, so their hooks can't see the thread id.
 - **`failures.json`** holds terminal agents whose last turn failed: `{"win:<window id>" | "<kitty pid>": {"error", "time"}}`.
 
 ## Security notes

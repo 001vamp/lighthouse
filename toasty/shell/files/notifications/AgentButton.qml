@@ -2,12 +2,13 @@ import QtQuick
 import ".." as Shell
 
 // 28px toast button from the Pond toast library.
-// primary: filled with the toast's text colour. pill: suggested reply.
+// primary: filled with the toast's text colour. pill: suggested reply. flat: a text link.
 Rectangle {
   id: root
   property string label: ""
   property bool primary: false
   property bool pill: false
+  property bool flat: false
   property color ink: "#211E24"
   property color surface: "#E4DFE6"
   property color line: Qt.rgba(0, 0, 0, 0.14)
@@ -32,11 +33,11 @@ Rectangle {
     visible: root.activeFocus
   }
 
-  implicitWidth: text.implicitWidth + 24
-  implicitHeight: 32
+  implicitWidth: text.implicitWidth + (flat ? 16 : 24)
+  implicitHeight: flat ? 24 : 32
   radius: pill ? 14 : 8
   color: primary ? ink : pointer.containsMouse ? hoverFill : "transparent"
-  border.width: primary ? 0 : 1
+  border.width: primary || flat ? 0 : 1
   border.color: line
   opacity: primary && pointer.containsMouse ? 0.88 : 1
   antialiasing: true

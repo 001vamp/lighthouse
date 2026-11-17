@@ -29,7 +29,7 @@ class Env(unittest.TestCase):
         # Nothing from the desktop this runs on: no kitty, no agent app, and a fake niri
         # that reports no focused window.
         for key in list(self.env):
-            if key.startswith(('KITTY_', 'CLAUDE', 'CODEX_', 'NIRI_')):
+            if key.startswith(('KITTY_', 'CLAUDE', 'CODEX_', 'NIRI_', 'T3CODE_')):
                 self.env.pop(key)
         niri = os.path.join(self.fakebin, 'niri')
         with open(niri, 'w') as f:

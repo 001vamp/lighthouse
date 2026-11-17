@@ -201,13 +201,18 @@ def restart_pond():
     """Stop every running packaged-or-overlay Pond and start `qs -c pond-shell` again, which now
     resolves to whichever one is installed. `qs kill -c` alone would only find the new path."""
     pond_dirs = {os.path.realpath(d) for d in (POND_OVERLAY, POND_PACKAGED, '/etc/xdg/quickshell/pond-shell')}
-    listing = run(['qs', 'list', '--all']).stdout
-    stopped = 0
-    for instance, config in re.findall(r'^Instance (\S+):.*?^\s*Config path: ([^\n]+)$', listing, re.M | re.S):
-        if os.path.realpath(os.path.dirname(config.strip())) in pond_dirs:
-            stopped += run(['qs', 'kill', '-i', instance]).returncode == 0
+    def ponds():
+        listing = run(['qs', 'list', '--all']).stdout
+        return [i for i, config in re.findall(r'^Instance (\S+):.*?^\s*Config path: ([^\n]+)$', listing, re.M | re.S)
+                if os.path.realpath(os.path.dirname(config.strip())) in pond_dirs]
+    stopped = sum(run(['qs', 'kill', '-i', i]).returncode == 0 for i in ponds())
     if not stopped:
         return 'no running Pond found: it picks this up the next time it starts'
+    # A Pond watching its files may reload itself on the new overlay instead of stopping,
+    # under a new instance id. Starting another then would leave two docks.
+    time.sleep(1)
+    if ponds():
+        return 'Pond reloaded'
     if shutil.which('niri') and run(['niri', 'msg', 'action', 'spawn', '--', 'qs', '-c', 'pond-shell']).returncode == 0:
         return 'Pond restarted'
     subprocess.Popen(['qs', '-c', 'pond-shell'], start_new_session=True,

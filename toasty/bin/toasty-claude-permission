@@ -54,7 +54,7 @@ def main():
     suggestions = [s for s in data.get('permission_suggestions') or []
                    if s.get('type') == 'addRules' and s.get('behavior') == 'allow']
     title, detail = describe(tool, args, cwd)
-    # The toast shows the short summary; Show details holds the complete input.
+    # The toast shows the short summary; "More" holds the complete input.
     full = json.dumps(args, ensure_ascii=False, indent=2)
     complete = len(full.encode('utf-8')) <= 16384
     if not complete:

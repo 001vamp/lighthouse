@@ -54,16 +54,27 @@ Item {
   property bool expanded: false
   readonly property bool approval: kind === "needs" && (actions.some(a => a.identifier === "allow") || notification.codeComplete === false)
   readonly property bool navigable: !!(notification.openUrl || notification.windowId || notification.desktopEntry)
-  readonly property string eventTitle: kind === "done" ? "Turn finished"
-      : kind === "needs" ? (approval || notification.reason === "approval" ? "Approval needed" : "Input needed")
-      : kind === "failed" ? "Couldn’t finish"
-      : kind === "paused" ? (notification.reason === "Interrupted" ? "Interrupted" : "Paused")
-      : String(notification.summary || "Update")
-  readonly property string supportingText: kind === "done" ? ""
-      : approval ? String(notification.summary || "Review this request")
-      : kind === "paused" && notification.reason ? notification.reason
-      : previewText(messageText)
-  readonly property string detailText: kind === "done" ? previewText(messageText) : messageText
+  // Slim layout: one headline ("Claude finished · lighthouse"), a short preview, and links.
+  // Everything else (code, the full message, a reply box) grows the card only when it's there.
+  readonly property string headline: {
+    const name = identity.name || "Agent";
+    const head = away ? "While you were away"
+        : kind === "done" ? name + " finished"
+        : kind === "needs" ? name + " needs you"
+        : kind === "failed" ? name + " couldn’t finish"
+        : kind === "paused" ? name + (notification.reason === "Interrupted" ? " was interrupted" : " paused")
+        : String(notification.summary || name);
+    return head + (notification.context && !away ? " · " + notification.context : "");
+  }
+  readonly property string preview: away ? ""
+      : approval ? String(notification.summary || "Wants to use a tool")
+      : kind === "paused" && notification.reason && notification.reason !== "Interrupted" ? notification.reason
+      : previewText(messageText).trim()
+  // More shows the whole message, even when a short reason stands in for it in the preview.
+  readonly property string fullText: approval ? preview : previewText(messageText).trim()
+  readonly property string moreText: [code ? "" : fullText, notification.details || code].filter(v => v).join("\n\n")
+  readonly property bool canExpand: !away && (previewLine.truncated || codeText.truncated || !!notification.details
+                                              || (!code && fullText !== "" && fullText !== preview))
   readonly property bool held: hover.hovered || card.activeFocus || focusWithin(card)
       || field.text.length > 0 || expanded
   function focusWithin(item) {
@@ -82,6 +93,7 @@ Item {
     ).join("");
   }
   property string delivery: ""   // "", "sending", "sent", "failed"
+  property string sentText: ""
   readonly property bool sent: delivery !== ""
   property real remaining: 1
 
@@ -95,12 +107,16 @@ Item {
 
   // Geometry. pad leaves room for the shadow; insets leave room for mascots that stick out.
   readonly property int pad: 12
-  readonly property int mascotSize: 32
+  readonly property int mascotSize: 26
   readonly property int leftInset: 0
   readonly property int topInset: 0
   readonly property int cardWidth: Math.min(380, Math.max(240, Screen.width - 56))
-  readonly property int padLeft: 16
-  readonly property int cardHeight: Math.max(100, body.height + 32)
+  readonly property int padX: 12
+  readonly property int padY: 10
+  // Text and everything that grows line up after the mascot.
+  readonly property int textX: padX + mascotSize + 10
+  readonly property int textWidth: cardWidth - textX - padX
+  readonly property int cardHeight: Math.max(mascotSize + padY * 2, body.height + padY * 2)
 
   signal activated
   signal dismissed
@@ -137,6 +153,7 @@ Item {
     text = String(text || "").trim();
     if (!text || sent) return;
     delivery = "sending";
+    sentText = text;
     field.focus = false;
     root.replied(text);
     if (usesMarkers) {
@@ -164,6 +181,7 @@ Item {
     confirm.running = false;
     sentClose.stop();
     delivery = "";
+    sentText = "";
     expanded = false;
     pickedUp = false;
     pickup.stop();
@@ -248,114 +266,161 @@ Item {
 
     Column {
       id: body
-      x: root.padLeft
-      y: 16
-      width: root.cardWidth - 32
+      x: root.textX
+      y: root.padY
+      width: root.textWidth
 
+      // Headline and preview on the left; links and a hover-only close on the right.
       Item {
-        width: parent.width - 32; height: 32
-        Row {
-          x: 44
-          spacing: 8
-          anchors.verticalCenter: parent.verticalCenter
+        width: parent.width
+        height: Math.max(root.mascotSize, textColumn.height)
+        Column {
+          id: textColumn
+          width: parent.width
+          y: Math.max(0, (root.mascotSize - height) / 2)
+          Row {
+            width: parent.width - links.width - 12
+            spacing: 6
+            Text {
+              id: headlineText
+              width: Math.min(implicitWidth, parent.width - ageText.implicitWidth - 6)
+              text: root.headline
+              textFormat: Text.PlainText
+              color: root.ink; font.family: Shell.Theme.fontFamily
+              font.pixelSize: 13; font.weight: Font.DemiBold
+              lineHeight: 18; lineHeightMode: Text.FixedHeight
+              elide: Text.ElideRight; maximumLineCount: 1
+            }
+            Text {
+              id: ageText
+              readonly property string age: Notifications.State.relativeTimeLabel(root.notification.timestamp || Date.now())
+              // Brought back after a shell reload: say how long it has been waiting.
+              text: [root.notification.restored ? "Still waiting" + (age === "Now" ? "" : " · " + age) : age,
+                     Notifications.State.queue.length ? Notifications.State.queue.length + " waiting" : ""]
+                  .filter(v => v).join(" · ")
+              textFormat: Text.PlainText
+              color: root.muted; font.family: Shell.Theme.fontFamily; font.pixelSize: 11
+              lineHeight: 18; lineHeightMode: Text.FixedHeight
+            }
+          }
           Text {
-            width: Math.max(0, Math.min(implicitWidth, time.x - 16 - 8))
-            text: root.identity.name
+            id: previewLine
+            width: parent.width
+            visible: root.preview !== "" && !root.expanded
+            text: root.preview
             textFormat: Text.PlainText
-            color: root.ink; font.family: Shell.Theme.fontFamily
-            font.pixelSize: 13; font.weight: Font.Bold; elide: Text.ElideRight
+            color: root.muted; font.family: Shell.Theme.fontFamily; font.pixelSize: 12
+            lineHeight: 17; lineHeightMode: Text.FixedHeight
+            wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight
+          }
+          Text {
+            id: moreLink
+            visible: root.canExpand
+            text: root.expanded ? "Less" : "More"
+            color: root.ink; font.family: Shell.Theme.fontFamily; font.pixelSize: 11; font.weight: Font.DemiBold
+            lineHeight: 18; lineHeightMode: Text.FixedHeight
+            font.underline: moreArea.containsMouse || activeFocus
+            activeFocusOnTab: true
+            Accessible.role: Accessible.Button
+            Accessible.name: text
+            Accessible.onPressAction: root.expanded = !root.expanded
+            Keys.onReturnPressed: root.expanded = !root.expanded
+            Keys.onSpacePressed: root.expanded = !root.expanded
+            MouseArea {
+              id: moreArea
+              anchors.fill: parent; anchors.margins: -4
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.expanded = !root.expanded
+            }
           }
         }
-        Text {
-          id: time
-          // At most 60% of the row: a long project name gets cut from the left, so the
-          // time and waiting count stay readable and the sender keeps its space.
-          width: Math.min(implicitWidth, parent.width * 0.6)
-          elide: Text.ElideLeft
-          x: parent.width - width
-          anchors.verticalCenter: parent.verticalCenter
-          textFormat: Text.PlainText
-          readonly property string age: Notifications.State.relativeTimeLabel(root.notification.timestamp || Date.now())
-          // Brought back after a shell reload: say how long it has been waiting.
-          text: [root.notification.context,
-                 root.notification.restored ? "Still waiting" + (age === "Now" ? "" : " · " + age) : age,
-                 Notifications.State.queue.length ? Notifications.State.queue.length + " waiting" : ""]
-              .filter(v => v).join(" · ")
-          color: root.muted; font.family: Shell.Theme.fontFamily; font.pixelSize: 11
+        Row {
+          id: links
+          anchors.right: parent.right
+          // Lined up with the headline, so a two-line preview runs underneath.
+          y: textColumn.y + (18 - height) / 2
+          spacing: 2
+          Notifications.AgentButton {
+            visible: root.navigable && !root.away
+            label: root.kind === "needs" ? "Open thread" : "Open"
+            flat: true
+            ink: root.ink; surface: root.surface; line: root.line; hoverFill: root.hoverFill
+            onClicked: root.activated()
+          }
         }
-      }
-      Item { width: 1; height: 2 }
-      Text {
-        width: parent.width
-        text: root.eventTitle
-        textFormat: Text.PlainText
-        color: root.ink; font.family: Shell.Theme.fontFamily
-        font.pixelSize: 15; font.weight: Font.DemiBold; lineHeight: 22; lineHeightMode: Text.FixedHeight
-        wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight
       }
 
-      Text {
+      // Code: monospace on a faint fill, up to 3 lines until expanded.
+      Item { width: 1; height: 8; visible: codeBox.visible }
+      Rectangle {
+        id: codeBox
+        visible: root.code !== "" && !root.expanded
         width: parent.width
-        visible: !root.away && root.supportingText !== ""
-        text: root.supportingText
-        textFormat: Text.PlainText
-        color: root.muted; font.family: Shell.Theme.fontFamily; font.pixelSize: 14
-        lineHeight: 20; lineHeightMode: Text.FixedHeight
-        wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight
-      }
-      Item { width: 1; height: 12; visible: navigation.visible }
-      Flow {
-        id: navigation
-        width: parent.width; spacing: 8
-        visible: !root.away && (root.navigable || root.detailText !== "" || root.code !== "")
-        Notifications.AgentButton {
-          visible: root.navigable
-          label: root.notification.openUrl || root.notification.windowId ? "Open session" : "Open app"
-          primary: true
-          ink: root.ink; surface: root.surface; line: root.line; hoverFill: root.hoverFill
-          onClicked: root.activated()
-        }
-        Notifications.AgentButton {
-          visible: root.detailText !== "" || root.code !== ""
-          label: root.expanded ? "Hide details" : "Show details"
-          ink: root.ink; surface: root.surface; line: root.line; hoverFill: root.hoverFill
-          onClicked: root.expanded = !root.expanded
+        height: codeText.height + 16
+        radius: 8
+        color: root.hoverFill
+        Text {
+          id: codeText
+          x: 10; y: 8
+          width: parent.width - 20
+          text: root.code
+          textFormat: Text.PlainText
+          color: root.ink; font.family: Shell.Theme.plexFontFamily
+          font.pixelSize: 12; lineHeight: 18; lineHeightMode: Text.FixedHeight
+          wrapMode: Text.Wrap; maximumLineCount: 3; elide: Text.ElideRight
         }
       }
-      Item { width: 1; height: 8; visible: root.expanded }
+
+      // More: the whole message (and any details), about 8 lines, then it scrolls.
+      Item { width: 1; height: 6; visible: root.expanded }
       ScrollView {
         visible: root.expanded
         width: parent.width
-        height: Math.min(detailContent.implicitHeight + 16, Math.max(100, Screen.height * 0.4))
+        height: Math.min(moreContent.implicitHeight, 8 * 18 + 16)
         clip: true
         TextArea {
-          id: detailContent
-          text: (root.kind === "done" ? "Reply preview\n\n" : "") + root.detailText
-              + (root.notification.details || root.code ? "\n\n" + (root.notification.details || root.code) : "")
+          id: moreContent
+          text: root.moreText
           textFormat: TextEdit.PlainText
           readOnly: true; selectByMouse: true
           wrapMode: TextEdit.Wrap
           color: root.ink
-          font.family: root.code ? Shell.Theme.plexFontFamily : Shell.Theme.fontFamily
-          font.pixelSize: 14
+          font.family: root.code || root.notification.details ? Shell.Theme.plexFontFamily : Shell.Theme.fontFamily
+          font.pixelSize: 12
+          padding: 8
           background: Rectangle { color: root.hoverFill; radius: 8 }
         }
       }
 
+      // Never let a cut-off command pass as the whole thing.
+      readonly property string fullCaption: [root.notification.codeComplete === false ? "Full request available in session. Review there before answering." : "",
+                                             root.caption].filter(v => v).join("\n")
+      Item { width: 1; height: 6; visible: body.fullCaption !== "" }
+      Text {
+        visible: body.fullCaption !== ""
+        width: parent.width
+        text: body.fullCaption
+        textFormat: Text.PlainText
+        color: root.muted; font.family: Shell.Theme.fontFamily
+        font.pixelSize: 11; lineHeight: 16; lineHeightMode: Text.FixedHeight
+        wrapMode: Text.Wrap; maximumLineCount: 3; elide: Text.ElideRight
+      }
+
       // While you were away: one line per event, Waiting first. Each opens its agent;
       // the card goes once every line is opened, or with the close button.
-      Item { width: 1; height: 8; visible: root.away }
+      Item { width: 1; height: 4; visible: root.away }
       Column {
         visible: root.away
         width: parent.width
-        spacing: 4
+        spacing: 2
         Repeater {
           model: root.away ? root.notification.lines || [] : []
           delegate: Rectangle {
             id: awayLine
             required property var modelData
             readonly property bool opened: (root.notification.opened || []).includes(modelData.id)
-            width: parent.width; height: 32; radius: 8
+            width: parent.width; height: 28; radius: 8
             color: lineArea.containsMouse || activeFocus ? root.hoverFill : "transparent"
             opacity: opened ? 0.5 : 1
             activeFocusOnTab: true
@@ -367,13 +432,13 @@ Item {
             Keys.onReturnPressed: Notifications.State.openLine(root.notification, modelData)
             Keys.onSpacePressed: Notifications.State.openLine(root.notification, modelData)
             Rectangle {
-              x: 8; anchors.verticalCenter: parent.verticalCenter
+              x: 6; anchors.verticalCenter: parent.verticalCenter
               width: 8; height: 8; radius: 4
               color: awayLine.modelData.kind === "needs" ? "#FF8A00"
                    : awayLine.modelData.kind === "failed" ? "#DC2626" : awayLine.modelData.kind === "paused" ? "#8B6F47" : "#2563EB"
             }
             Text {
-              x: 24; width: parent.width - 32
+              x: 22; width: parent.width - 28
               anchors.verticalCenter: parent.verticalCenter
               text: awayLine.modelData.name
                     + (awayLine.modelData.context ? " · " + awayLine.modelData.context : "")
@@ -395,41 +460,8 @@ Item {
         }
       }
 
-      // Code block: 8px below the question, monospace on a faint fill, up to 3 lines.
-      Item { width: 1; height: 8; visible: root.code !== "" && !root.expanded }
-      Rectangle {
-        visible: root.code !== "" && !root.expanded
-        width: parent.width
-        height: codeText.height + 16
-        radius: 8
-        color: root.hoverFill
-        Text {
-          id: codeText
-          x: 12; y: 8
-          width: parent.width - 24
-          text: root.code
-          textFormat: Text.PlainText
-          color: root.ink; font.family: Shell.Theme.plexFontFamily
-          font.pixelSize: 12; lineHeight: 18; lineHeightMode: Text.FixedHeight
-          wrapMode: Text.Wrap; maximumLineCount: 3; elide: Text.ElideRight
-        }
-      }
-      // Never let a cut-off command pass as the whole thing you're approving.
-      readonly property string fullCaption: [root.notification.codeComplete === false ? "Full request available in session. Review there before answering." : "",
-                                             root.caption].filter(v => v).join("\n")
-      Item { width: 1; height: 8; visible: body.fullCaption !== "" }
-      Text {
-        visible: body.fullCaption !== ""
-        width: parent.width
-        text: body.fullCaption
-        textFormat: Text.PlainText
-        color: root.muted; font.family: Shell.Theme.fontFamily
-        font.pixelSize: 12; lineHeight: 16; lineHeightMode: Text.FixedHeight
-        wrapMode: Text.Wrap; maximumLineCount: 3; elide: Text.ElideRight
-      }
-
-      // Actions: 12px below the message, first one primary; wraps if they don't fit.
-      Item { width: 1; height: 12; visible: actionRow.visible }
+      // Actions from the sender, first one primary; wraps if they don't fit.
+      Item { width: 1; height: 10; visible: actionRow.visible }
       Flow {
         id: actionRow
         width: parent.width; spacing: 8
@@ -441,7 +473,6 @@ Item {
             required property var modelData
             required property int index
             label: modelData.text
-            // Allow and Deny carry equal weight; "Always allow" is the quieter choice.
             primary: index === 0 || modelData.identifier === "deny"
             ink: root.ink; surface: root.surface; line: root.line; hoverFill: root.hoverFill
             onClicked: root.requestAction(modelData.identifier)
@@ -450,7 +481,7 @@ Item {
       }
 
       // How it ended, or why the buttons went away.
-      Item { width: 1; height: 12; visible: stampRow.visible }
+      Item { width: 1; height: 10; visible: stampRow.visible }
       Row {
         id: stampRow
         visible: root.stamp !== "" || (root.usesMarkers && !root.listening && root.actions.length > 0)
@@ -484,7 +515,7 @@ Item {
       }
 
       // Suggested replies, one click each.
-      Item { width: 1; height: 12; visible: chipRow.visible }
+      Item { width: 1; height: 10; visible: chipRow.visible }
       Flow {
         id: chipRow
         width: parent.width; spacing: 8
@@ -501,7 +532,8 @@ Item {
         }
       }
 
-      Item { width: 1; height: chipRow.visible ? 8 : 12; visible: reply.visible }
+      // Reply box: only when the session can take a reply.
+      Item { width: 1; height: chipRow.visible ? 8 : 10; visible: reply.visible }
       Rectangle {
         id: reply
         width: parent.width; height: 36; radius: 10
@@ -560,12 +592,14 @@ Item {
         lineHeight: 16; lineHeightMode: Text.FixedHeight
       }
 
-      // Delivery status: sending → sent (green check), or failed (red "!" + Open).
-      Item { width: 1; height: 12; visible: root.sent }
+      // Delivery: sending → "Sent: <what you wrote>" with a green check, or failed (red "!" + Open).
+      Item { width: 1; height: 10; visible: root.sent }
       Row {
         visible: root.sent
+        width: parent.width
         spacing: 8
         Rectangle {
+          id: deliveryMark
           width: 16; height: 16; radius: 8
           visible: root.delivery !== "sending"
           color: root.delivery === "failed" ? "#DC2626" : "#16A34A"
@@ -584,15 +618,16 @@ Item {
           }
         }
         Text {
+          width: parent.width - (deliveryMark.visible ? deliveryMark.width + 8 : 0)
           anchors.verticalCenter: parent.verticalCenter
-          text: root.delivery === "sending" ? "Sending…"
+          text: root.delivery === "sending" ? "Sending “" + root.sentText + "”…"
               : root.delivery === "failed" ? "Couldn’t deliver to " + root.identity.name
-              : root.pickedUp ? "Sent · " + root.identity.name + " is on it"
-              : "Sent to " + root.identity.name
+              : (root.pickedUp ? root.identity.name + " is on it: “" : "Sent: “") + root.sentText + "”"
           textFormat: Text.PlainText
           color: root.delivery === "failed" ? root.ink : root.muted
           font.family: Shell.Theme.fontFamily; font.pixelSize: 12
           font.weight: root.delivery === "failed" ? Font.DemiBold : Font.Normal
+          elide: Text.ElideRight; maximumLineCount: 1
         }
       }
       Item { width: 1; height: 4; visible: failedHelp.visible }
@@ -604,22 +639,16 @@ Item {
         color: root.muted; font.family: Shell.Theme.fontFamily; font.pixelSize: 12
         wrapMode: Text.Wrap; lineHeight: 16; lineHeightMode: Text.FixedHeight
       }
-      Item { width: 1; height: 12; visible: root.delivery === "failed" }
-      Notifications.AgentButton {
-        visible: root.delivery === "failed"
-        label: "Open session"
-        primary: true
-        ink: root.ink; surface: root.surface; line: root.line; hoverFill: root.hoverFill
-        onClicked: root.activated()
-      }
     }
 
-    // 28px round close, centred on the sender line (16 top pad + 10 half line = 26).
+    // Close: a small badge on the top-left corner, only while the pointer is on the card.
     Rectangle {
       id: closeButton
-      x: parent.width - 12 - width; y: body.y - 4
-      width: 32; height: 32; radius: 16
-      color: closeArea.containsMouse || activeFocus ? root.hoverFill : "transparent"
+      x: -6; y: -6; z: 2
+      width: 22; height: 22; radius: 11
+      opacity: hover.hovered || activeFocus ? 1 : 0
+      Behavior on opacity { NumberAnimation { duration: 120 } }
+      color: closeArea.containsMouse || activeFocus ? "#FFFFFF" : root.surface
       // Keyboard: Tab to it, then Enter, Space or Delete dismisses.
       activeFocusOnTab: true
       border.width: activeFocus ? 2 : 0
@@ -638,7 +667,7 @@ Item {
         Rectangle {
           required property var modelData
           anchors.centerIn: parent
-          width: 11; height: 1.6; radius: 0.8
+          width: 8; height: 1.4; radius: 0.8
           rotation: modelData
           color: closeArea.containsMouse ? root.ink : root.muted
           antialiasing: true
@@ -668,8 +697,8 @@ Item {
     width: root.mascotSize; height: root.mascotSize
     transform: Translate { id: mascotShift }
     // Waiting breathes, slowly, so it reads as "still here" without asking twice.
-    x: card.x + 16
-    y: card.y + 16
+    x: card.x + root.padX
+    y: card.y + root.padY
     radius: root.look.avatar ? width / 2 : 0
     color: root.look.avatar ? "#F4F1F5" : "transparent"
     IconImage {
