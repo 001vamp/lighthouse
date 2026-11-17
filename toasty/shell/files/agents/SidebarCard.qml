@@ -21,6 +21,11 @@ Shell.Card {
   readonly property real widthProgress: Shell.Theme.collapseWidth(collapseProgress)
   readonly property real heightProgress: Shell.Theme.collapseHeight(collapseProgress)
   readonly property int rowHeight: Math.round(Shell.Theme.lerp(58, 40, heightProgress))
+  // "Jobs" and "Agents" headings, when the dock holds both: the row index each one sits above.
+  // They fold away with the dock.
+  property var headerAt: []
+  readonly property int headerHeight: Math.round(Shell.Theme.lerp(22, 0, heightProgress))
+  function headersAbove(i) { return headerAt.filter(h => h <= i).length; }
   readonly property int doneGrace: 6000
   readonly property int leaveDuration: 400
 
@@ -234,8 +239,10 @@ Shell.Card {
       if (!members.length) continue;
       const states = all.map(r => r.state);
       const has = st => states.includes(st);
-      const state = has("waiting") ? "waiting" : has("working") ? "working" : has("failed") ? "failed"
-          : has("paused") ? "paused" : has("unknown") ? "unknown" : has("ready") ? "ready" : "done";
+      // Anything that needs you outranks progress, so a failure never hides behind "Working".
+      const state = has("waiting") ? "waiting" : has("failed") ? "failed" : has("paused") ? "paused"
+          : has("working") ? "working" : has("unknown") ? "unknown" : has("ready") ? "ready" : "done";
+      const waiting = members.filter(sid => sessionRows[sid].state === "waiting").length;
       const finished = members.filter(sid => sessionRows[sid].state === "done").length;
       const reports = {};
       for (const sid of members.concat(owner ? [owners[id]] : [])) reports[sid] = root.sessions[sid];
@@ -246,7 +253,7 @@ Shell.Card {
                   task: title,
                   fullTask: (readable(jobs[id].job.title) || "Agent job") + "\n" + members.length + (members.length === 1 ? " agent: " : " agents: ")
                       + members.map(sid => sessionRows[sid].name + " " + root.label(sessionRows[sid].state).toLowerCase()).join(", "),
-                  detail: finished + " of " + members.length + " finished" + (has("waiting") ? " · one needs you" : "") });
+                  detail: finished + " of " + members.length + " agents finished" + (waiting ? " · " + waiting + (waiting === 1 ? " needs you" : " need you") : "") });
       childRows["job:" + id] = members.filter(sid => ["waiting", "failed", "paused"].includes(sessionRows[sid].state)).map(sid => sessionRows[sid]);
       for (const sid of members) delete sessionRows[sid];
       if (owner) delete sessionRows[owners[id]];
@@ -263,11 +270,16 @@ Shell.Card {
     const positions = {};
     for (let i = 0; i < rows.count; i++) positions[rows.get(i).key] = i;
     list.sort((a, b) => (positions[a.key] ?? rows.count) - (positions[b.key] ?? rows.count));
-    // A job's children that need you sit right under it.
-    const ordered = [];
-    for (const item of list) ordered.push(item, ...(childRows[item.key] || []));
+    // Jobs first, each with its children that need you right under it; then single agents.
+    const jobRows = [], agentRows = [];
+    for (const item of list) {
+      if (item.kind === "job") jobRows.push(item, ...(childRows[item.key] || []));
+      else agentRows.push(item);
+    }
     root.ticking = ticking;
-    sync(ordered);
+    sync(jobRows.concat(agentRows));
+    const headers = jobRows.length && agentRows.length ? [0, jobRows.length] : [];
+    if (JSON.stringify(headers) !== JSON.stringify(root.headerAt)) root.headerAt = headers;
   }
 
   // Update rows in place so a row keeps its delegate (and only animates when it changes).
@@ -349,7 +361,7 @@ Shell.Card {
 
   implicitWidth: Shell.Theme.lerp(Shell.Theme.sidebarCardExpandedWidth,
       Shell.Theme.sidebarCardCollapsedWidth, widthProgress)
-  implicitHeight: rows.count === 0 ? 0 : rows.count * rowHeight + 8
+  implicitHeight: rows.count === 0 ? 0 : rows.count * rowHeight + headerAt.length * headerHeight + 8
   Behavior on implicitHeight { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
   visible: implicitHeight > 0
   radius: Shell.Theme.lerp(12, Shell.Theme.sidebarCardRadius, widthProgress)
@@ -359,10 +371,27 @@ Shell.Card {
     return state === "ready" ? "#666666" : state === "waiting" ? "#FF8A00" : state === "done" ? "#2563EB"
         : state === "unknown" ? "#666666" : state === "paused" ? "#8B6F47" : state === "failed" ? "#DC2626" : state === "working" ? "#E4DFE6" : "transparent";
   }
-  function pillInk(state) { return state === "working" ? "#211E24" : "white"; }
+  // Dark ink on the light Working pill and on orange, where white is too faint to read.
+  function pillInk(state) { return state === "working" || state === "waiting" ? "#211E24" : "white"; }
   function label(state) {
     return state === "ready" ? "Ready" : state === "waiting" ? "Needs you" : state === "done" ? "Done"
         : state === "unknown" ? "Unknown" : state === "paused" ? "Paused" : state === "failed" ? "Failed" : state === "working" ? "Working" : "Idle";
+  }
+
+  Repeater {
+    model: root.headerAt
+    Text {
+      required property int modelData
+      required property int index
+      x: 14
+      y: 4 + modelData * root.rowHeight + index * root.headerHeight + (root.headerHeight - height) / 2 + 2
+      text: index === 0 ? "Jobs" : "Agents"
+      color: Qt.rgba(1, 1, 1, 0.45)
+      font.family: Shell.Theme.fontFamily; font.pixelSize: 10; font.weight: Font.DemiBold
+      font.capitalization: Font.AllUppercase; font.letterSpacing: 0.6
+      opacity: 1 - Shell.Theme.ramp(root.collapseProgress, 0, 0.3)
+      visible: opacity > 0
+    }
   }
 
   Repeater {
@@ -388,7 +417,7 @@ Shell.Card {
       readonly property bool dismissible: (key.startsWith("session:") || kind === "job") && state !== "working" && state !== "waiting"
       // Children sit a step in, under their job.
       readonly property int indent: kind === "child" ? Math.round(14 * (1 - root.widthProgress)) : 0
-      y: 4 + index * root.rowHeight
+      y: 4 + index * root.rowHeight + root.headersAbove(index) * root.headerHeight
       Behavior on y { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
       width: root.width
       height: root.rowHeight
@@ -500,6 +529,18 @@ Shell.Card {
         }
       }
 
+      // Hover and keyboard focus share the fill; focus also gets an inset ring.
+      Rectangle {
+        x: 4; y: 2
+        width: parent.width - 8; height: parent.height - 4
+        radius: 10
+        color: Shell.Theme.daylight ? Shell.Theme.sidebarHoverFill : "#262626"
+        opacity: hover.hovered || row.activeFocus ? 1 : 0
+        Behavior on opacity { Shell.HoverAnimation {} }
+        border.width: row.activeFocus ? 2 : 0
+        border.color: Qt.rgba(1, 1, 1, 0.5)
+      }
+
       // A job reads as a group, never as one agent: dashed outline, and its mascot on a stack.
       Shape {
         id: jobOutline
@@ -528,15 +569,6 @@ Shell.Card {
         }
       }
 
-      Rectangle {
-        x: 4; y: 2
-        width: parent.width - 8; height: parent.height - 4
-        radius: 10
-        color: Shell.Theme.daylight ? Shell.Theme.sidebarHoverFill : "#262626"
-        opacity: hover.hovered ? 1 : 0
-        Behavior on opacity { Shell.HoverAnimation {} }
-      }
-
       // Mascot: centred when collapsed, with a status dot standing in for the pill.
       Image {
         id: mascot
@@ -547,7 +579,7 @@ Shell.Card {
         source: Qt.resolvedUrl("../assets/agents/" + row.icon)
         sourceSize: Qt.size(56, 56)
         fillMode: Image.PreserveAspectFit
-        opacity: row.status === "idle" ? 0.55 : 1
+        opacity: row.status === "idle" ? 0.55 : row.status === "paused" ? 0.7 : 1
         Behavior on opacity { NumberAnimation { duration: 240 } }
       }
       Rectangle {
@@ -584,7 +616,7 @@ Shell.Card {
             Text {
               anchors.verticalCenter: parent.verticalCenter
               text: row.winId >= 0 && row.status === "done" ? "Ended"
-                  : root.label(row.status) + (row.count ? " " + row.count : "")
+                  : root.label(row.status) + (row.status === "working" && row.count ? " " + row.count : "")
               color: row.status === "idle" ? "#5C5760" : root.pillInk(row.status)
               font.family: Shell.Theme.fontFamily; font.pixelSize: 11; font.weight: Font.DemiBold
             }
@@ -631,7 +663,7 @@ Shell.Card {
       }
       RotationAnimator on rotation {
         from: 0; to: 360; duration: 900; loops: Animation.Infinite
-        running: parent.visible
+        running: parent.visible && !Notifications.State.reducedMotion
       }
     }
     Row {
@@ -642,9 +674,9 @@ Shell.Card {
         model: 3
         Rectangle {
           required property int index
-          width: 2.5; height: 2.5; radius: 1.25; color: "white"
+          width: 2.5; height: 2.5; radius: 1.25; color: statusIcon.ink
           SequentialAnimation on opacity {
-            running: statusIcon.status === "waiting"; loops: Animation.Infinite
+            running: statusIcon.status === "waiting" && !Notifications.State.reducedMotion; loops: Animation.Infinite
             PauseAnimation { duration: index * 160 }
             NumberAnimation { from: 0.3; to: 1; duration: 320 }
             NumberAnimation { from: 1; to: 0.3; duration: 320 }
@@ -670,14 +702,14 @@ Shell.Card {
       width: 14; height: 14; radius: 7
       color: "#16A34A"
       border.width: 1.5; border.color: "white"
-      scale: 0
+      scale: Notifications.State.reducedMotion ? 1 : 0
       Text {
         anchors.centerIn: parent
         text: "✓"; color: "white"
         font.pixelSize: 9; font.weight: Font.Bold
       }
       SequentialAnimation {
-        running: badge.visible
+        running: badge.visible && !Notifications.State.reducedMotion
         PropertyAction { target: badge; property: "scale"; value: 0 }
         PauseAnimation { duration: 220 }
         NumberAnimation { target: badge; property: "scale"; to: 1; duration: 360; easing.type: Easing.OutBack; easing.overshoot: 2.2 }

@@ -188,8 +188,6 @@ Item {
     listening = true;
     field.text = "";
     remaining = 1;
-    shownAt = Date.now();
-    if (countdown.running) countdown.restart();
     const n = notification || {};
     usesMarkers = /^(Toasty|PondAgent)\|/.test(String(n.appName || "")) && !!n.serverId;
     markerPath = Notifications.State.markerDir + "/" + (n.serverId || 0);
@@ -283,16 +281,27 @@ Item {
             spacing: 6
             Text {
               id: headlineText
-              width: Math.min(implicitWidth, parent.width - ageText.implicitWidth - 6)
+              width: Math.max(0, Math.min(implicitWidth, parent.width - ageText.width - 6))
               text: root.headline
               textFormat: Text.PlainText
               color: root.ink; font.family: Shell.Theme.fontFamily
               font.pixelSize: 13; font.weight: Font.DemiBold
               lineHeight: 18; lineHeightMode: Text.FixedHeight
               elide: Text.ElideRight; maximumLineCount: 1
+              // Cut short: the whole line on hover, or when the Open link has keyboard focus.
+              HoverHandler { id: headlineHover }
+              ToolTip {
+                popupType: Popup.Window
+                visible: headlineText.truncated && (headlineHover.hovered || openLink.activeFocus)
+                delay: 400
+                text: root.headline
+              }
             }
             Text {
               id: ageText
+              // Never wide enough to push the headline out.
+              width: Math.min(implicitWidth, parent.width * 0.35)
+              elide: Text.ElideRight
               readonly property string age: Notifications.State.relativeTimeLabel(root.notification.timestamp || Date.now())
               // Brought back after a shell reload: say how long it has been waiting.
               text: [root.notification.restored ? "Still waiting" + (age === "Now" ? "" : " · " + age) : age,
@@ -342,8 +351,10 @@ Item {
           y: textColumn.y + (18 - height) / 2
           spacing: 2
           Notifications.AgentButton {
+            id: openLink
             visible: root.navigable && !root.away
             label: root.kind === "needs" ? "Open thread" : "Open"
+            Accessible.name: label + ": " + root.headline
             flat: true
             ink: root.ink; surface: root.surface; line: root.line; hoverFill: root.hoverFill
             onClicked: root.activated()
@@ -554,6 +565,9 @@ Item {
           color: root.ink; selectionColor: "#CBA6F7"; selectedTextColor: root.ink
           font.family: Shell.Theme.fontFamily; font.pixelSize: 13
           clip: true; maximumLength: 500
+          activeFocusOnTab: true
+          Accessible.role: Accessible.EditableText
+          Accessible.name: "Reply to " + root.identity.name
           Keys.onReturnPressed: root.send(text)
           Keys.onEnterPressed: root.send(text)
           Keys.onEscapePressed: { text = ""; focus = false; }
@@ -566,9 +580,19 @@ Item {
           }
         }
         Rectangle {
+          id: sendButton
           x: parent.width - 32; y: 4; width: 28; height: 28; radius: 8
           color: root.ink
           opacity: field.text.trim() ? 1 : 0.3
+          activeFocusOnTab: field.text.trim() !== ""
+          border.width: activeFocus ? 2 : 0
+          border.color: root.focusRing
+          Accessible.role: Accessible.Button
+          Accessible.name: "Send reply"
+          Accessible.onPressAction: root.send(field.text)
+          Keys.onReturnPressed: root.send(field.text)
+          Keys.onEnterPressed: root.send(field.text)
+          Keys.onSpacePressed: root.send(field.text)
           Behavior on opacity { NumberAnimation { duration: 160 } }
           Image {
             anchors.centerIn: parent; width: 14; height: 14
@@ -682,7 +706,7 @@ Item {
       }
     }
 
-    // Auto-dismiss: 2px bar along the bottom edge, drains over 8s, pauses while held.
+    // Auto-dismiss: 2px bar along the bottom edge, drained by the countdown below.
     Rectangle {
       x: 16; y: parent.height - 2; height: 2; radius: 1
       width: (parent.width - 32) * root.remaining
@@ -715,25 +739,18 @@ Item {
     NumberAnimation { target: mascotShift; property: "y"; to: 0; duration: 260; easing.type: Easing.OutBack }
   }
 
-  NumberAnimation {
-    id: countdown
-    target: root; property: "remaining"
-    from: 1; to: 0; duration: 8000
-    running: !root.sticky && !root.sent && root.visible
-    // Paused while held, and while you're away: it waits for you instead of expiring.
-    paused: running && (root.held || Notifications.State.away)
-    onFinished: if (root.remaining <= 0) root.expired()
-  }
-
-  // Others are waiting their turn: a Done card gets 3s instead of the full 8s, so a burst of
-  // finishing agents doesn't take a minute to get through.
-  property real shownAt: 0
-  onVisibleChanged: if (visible) shownAt = Date.now()
+  // One clock drives both the bar and the dismissal: 8s, or 3s while others wait their turn so a
+  // burst of finishing agents doesn't take a minute to get through. It stops while you hold the
+  // card (hover, focus, typing, More) and while you're away, so it waits for you.
+  readonly property int lifetime: Notifications.State.queue.length ? 3000 : 8000
   Timer {
-    interval: 250; repeat: true
-    running: root.visible && !root.sticky && !root.sent
-    onTriggered: if (Notifications.State.queue.length && !root.held && !Notifications.State.away
-                     && !root.stamp && Date.now() - root.shownAt >= 3000) root.expired()
+    id: countdown
+    interval: 100; repeat: true
+    running: !root.sticky && !root.sent && root.visible && !root.stamp && !root.held && !Notifications.State.away
+    onTriggered: {
+      root.remaining = Math.max(0, root.remaining - interval / root.lifetime);
+      if (root.remaining <= 0) root.expired();
+    }
   }
 
   // Proof it landed: after "Sent", watch the agent's terminal title for up to 4s. If the agent
