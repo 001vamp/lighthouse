@@ -21,6 +21,11 @@ Shell.Card {
   readonly property real widthProgress: Shell.Theme.collapseWidth(collapseProgress)
   readonly property real heightProgress: Shell.Theme.collapseHeight(collapseProgress)
   readonly property int rowHeight: Math.round(Shell.Theme.lerp(58, 40, heightProgress))
+  // "Jobs" and "Agents" headings, when the dock holds both: the row index each one sits above.
+  // They fold away with the dock.
+  property var headerAt: []
+  readonly property int headerHeight: Math.round(Shell.Theme.lerp(22, 0, heightProgress))
+  function headersAbove(i) { return headerAt.filter(h => h <= i).length; }
   readonly property int doneGrace: 6000
   readonly property int leaveDuration: 400
 
@@ -263,11 +268,16 @@ Shell.Card {
     const positions = {};
     for (let i = 0; i < rows.count; i++) positions[rows.get(i).key] = i;
     list.sort((a, b) => (positions[a.key] ?? rows.count) - (positions[b.key] ?? rows.count));
-    // A job's children that need you sit right under it.
-    const ordered = [];
-    for (const item of list) ordered.push(item, ...(childRows[item.key] || []));
+    // Jobs first, each with its children that need you right under it; then single agents.
+    const jobRows = [], agentRows = [];
+    for (const item of list) {
+      if (item.kind === "job") jobRows.push(item, ...(childRows[item.key] || []));
+      else agentRows.push(item);
+    }
     root.ticking = ticking;
-    sync(ordered);
+    sync(jobRows.concat(agentRows));
+    const headers = jobRows.length && agentRows.length ? [0, jobRows.length] : [];
+    if (JSON.stringify(headers) !== JSON.stringify(root.headerAt)) root.headerAt = headers;
   }
 
   // Update rows in place so a row keeps its delegate (and only animates when it changes).
@@ -349,7 +359,7 @@ Shell.Card {
 
   implicitWidth: Shell.Theme.lerp(Shell.Theme.sidebarCardExpandedWidth,
       Shell.Theme.sidebarCardCollapsedWidth, widthProgress)
-  implicitHeight: rows.count === 0 ? 0 : rows.count * rowHeight + 8
+  implicitHeight: rows.count === 0 ? 0 : rows.count * rowHeight + headerAt.length * headerHeight + 8
   Behavior on implicitHeight { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
   visible: implicitHeight > 0
   radius: Shell.Theme.lerp(12, Shell.Theme.sidebarCardRadius, widthProgress)
@@ -363,6 +373,22 @@ Shell.Card {
   function label(state) {
     return state === "ready" ? "Ready" : state === "waiting" ? "Needs you" : state === "done" ? "Done"
         : state === "unknown" ? "Unknown" : state === "paused" ? "Paused" : state === "failed" ? "Failed" : state === "working" ? "Working" : "Idle";
+  }
+
+  Repeater {
+    model: root.headerAt
+    Text {
+      required property int modelData
+      required property int index
+      x: 14
+      y: 4 + modelData * root.rowHeight + index * root.headerHeight + (root.headerHeight - height) / 2 + 2
+      text: index === 0 ? "Jobs" : "Agents"
+      color: Qt.rgba(1, 1, 1, 0.45)
+      font.family: Shell.Theme.fontFamily; font.pixelSize: 10; font.weight: Font.DemiBold
+      font.capitalization: Font.AllUppercase; font.letterSpacing: 0.6
+      opacity: 1 - Shell.Theme.ramp(root.collapseProgress, 0, 0.3)
+      visible: opacity > 0
+    }
   }
 
   Repeater {
@@ -388,7 +414,7 @@ Shell.Card {
       readonly property bool dismissible: (key.startsWith("session:") || kind === "job") && state !== "working" && state !== "waiting"
       // Children sit a step in, under their job.
       readonly property int indent: kind === "child" ? Math.round(14 * (1 - root.widthProgress)) : 0
-      y: 4 + index * root.rowHeight
+      y: 4 + index * root.rowHeight + root.headersAbove(index) * root.headerHeight
       Behavior on y { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
       width: root.width
       height: root.rowHeight
@@ -584,7 +610,7 @@ Shell.Card {
             Text {
               anchors.verticalCenter: parent.verticalCenter
               text: row.winId >= 0 && row.status === "done" ? "Ended"
-                  : root.label(row.status) + (row.count ? " " + row.count : "")
+                  : root.label(row.status) + (row.status === "working" && row.count ? " " + row.count : "")
               color: row.status === "idle" ? "#5C5760" : root.pillInk(row.status)
               font.family: Shell.Theme.fontFamily; font.pixelSize: 11; font.weight: Font.DemiBold
             }
