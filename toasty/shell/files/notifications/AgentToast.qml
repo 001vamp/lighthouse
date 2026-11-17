@@ -281,7 +281,7 @@ Item {
             spacing: 6
             Text {
               id: headlineText
-              width: Math.min(implicitWidth, parent.width - ageText.implicitWidth - 6)
+              width: Math.max(0, Math.min(implicitWidth, parent.width - ageText.width - 6))
               text: root.headline
               textFormat: Text.PlainText
               color: root.ink; font.family: Shell.Theme.fontFamily
