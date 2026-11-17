@@ -61,7 +61,7 @@ def main():
     cwd = data.get('cwd') or os.getcwd()
     project = os.path.basename(cwd) or 'Codex'
     title, detail = describe(tool, args, cwd)
-    # The toast shows the short summary; Show details holds the complete input.
+    # The toast shows the short summary; "More" holds the complete input.
     full = json.dumps(args, ensure_ascii=False, indent=2)
     complete = len(full.encode('utf-8')) <= 16384
     if not complete:
