@@ -239,8 +239,10 @@ Shell.Card {
       if (!members.length) continue;
       const states = all.map(r => r.state);
       const has = st => states.includes(st);
-      const state = has("waiting") ? "waiting" : has("working") ? "working" : has("failed") ? "failed"
-          : has("paused") ? "paused" : has("unknown") ? "unknown" : has("ready") ? "ready" : "done";
+      // Anything that needs you outranks progress, so a failure never hides behind "Working".
+      const state = has("waiting") ? "waiting" : has("failed") ? "failed" : has("paused") ? "paused"
+          : has("working") ? "working" : has("unknown") ? "unknown" : has("ready") ? "ready" : "done";
+      const waiting = members.filter(sid => sessionRows[sid].state === "waiting").length;
       const finished = members.filter(sid => sessionRows[sid].state === "done").length;
       const reports = {};
       for (const sid of members.concat(owner ? [owners[id]] : [])) reports[sid] = root.sessions[sid];
@@ -251,7 +253,7 @@ Shell.Card {
                   task: title,
                   fullTask: (readable(jobs[id].job.title) || "Agent job") + "\n" + members.length + (members.length === 1 ? " agent: " : " agents: ")
                       + members.map(sid => sessionRows[sid].name + " " + root.label(sessionRows[sid].state).toLowerCase()).join(", "),
-                  detail: finished + " of " + members.length + " finished" + (has("waiting") ? " · one needs you" : "") });
+                  detail: finished + " of " + members.length + " agents finished" + (waiting ? " · " + waiting + (waiting === 1 ? " needs you" : " need you") : "") });
       childRows["job:" + id] = members.filter(sid => ["waiting", "failed", "paused"].includes(sessionRows[sid].state)).map(sid => sessionRows[sid]);
       for (const sid of members) delete sessionRows[sid];
       if (owner) delete sessionRows[owners[id]];
@@ -369,7 +371,8 @@ Shell.Card {
     return state === "ready" ? "#666666" : state === "waiting" ? "#FF8A00" : state === "done" ? "#2563EB"
         : state === "unknown" ? "#666666" : state === "paused" ? "#8B6F47" : state === "failed" ? "#DC2626" : state === "working" ? "#E4DFE6" : "transparent";
   }
-  function pillInk(state) { return state === "working" ? "#211E24" : "white"; }
+  // Dark ink on the light Working pill and on orange, where white is too faint to read.
+  function pillInk(state) { return state === "working" || state === "waiting" ? "#211E24" : "white"; }
   function label(state) {
     return state === "ready" ? "Ready" : state === "waiting" ? "Needs you" : state === "done" ? "Done"
         : state === "unknown" ? "Unknown" : state === "paused" ? "Paused" : state === "failed" ? "Failed" : state === "working" ? "Working" : "Idle";
@@ -526,6 +529,18 @@ Shell.Card {
         }
       }
 
+      // Hover and keyboard focus share the fill; focus also gets an inset ring.
+      Rectangle {
+        x: 4; y: 2
+        width: parent.width - 8; height: parent.height - 4
+        radius: 10
+        color: Shell.Theme.daylight ? Shell.Theme.sidebarHoverFill : "#262626"
+        opacity: hover.hovered || row.activeFocus ? 1 : 0
+        Behavior on opacity { Shell.HoverAnimation {} }
+        border.width: row.activeFocus ? 2 : 0
+        border.color: Qt.rgba(1, 1, 1, 0.5)
+      }
+
       // A job reads as a group, never as one agent: dashed outline, and its mascot on a stack.
       Shape {
         id: jobOutline
@@ -554,15 +569,6 @@ Shell.Card {
         }
       }
 
-      Rectangle {
-        x: 4; y: 2
-        width: parent.width - 8; height: parent.height - 4
-        radius: 10
-        color: Shell.Theme.daylight ? Shell.Theme.sidebarHoverFill : "#262626"
-        opacity: hover.hovered ? 1 : 0
-        Behavior on opacity { Shell.HoverAnimation {} }
-      }
-
       // Mascot: centred when collapsed, with a status dot standing in for the pill.
       Image {
         id: mascot
@@ -573,7 +579,7 @@ Shell.Card {
         source: Qt.resolvedUrl("../assets/agents/" + row.icon)
         sourceSize: Qt.size(56, 56)
         fillMode: Image.PreserveAspectFit
-        opacity: row.status === "idle" ? 0.55 : 1
+        opacity: row.status === "idle" ? 0.55 : row.status === "paused" ? 0.7 : 1
         Behavior on opacity { NumberAnimation { duration: 240 } }
       }
       Rectangle {
@@ -657,7 +663,7 @@ Shell.Card {
       }
       RotationAnimator on rotation {
         from: 0; to: 360; duration: 900; loops: Animation.Infinite
-        running: parent.visible
+        running: parent.visible && !Notifications.State.reducedMotion
       }
     }
     Row {
@@ -668,9 +674,9 @@ Shell.Card {
         model: 3
         Rectangle {
           required property int index
-          width: 2.5; height: 2.5; radius: 1.25; color: "white"
+          width: 2.5; height: 2.5; radius: 1.25; color: statusIcon.ink
           SequentialAnimation on opacity {
-            running: statusIcon.status === "waiting"; loops: Animation.Infinite
+            running: statusIcon.status === "waiting" && !Notifications.State.reducedMotion; loops: Animation.Infinite
             PauseAnimation { duration: index * 160 }
             NumberAnimation { from: 0.3; to: 1; duration: 320 }
             NumberAnimation { from: 1; to: 0.3; duration: 320 }
@@ -696,14 +702,14 @@ Shell.Card {
       width: 14; height: 14; radius: 7
       color: "#16A34A"
       border.width: 1.5; border.color: "white"
-      scale: 0
+      scale: Notifications.State.reducedMotion ? 1 : 0
       Text {
         anchors.centerIn: parent
         text: "✓"; color: "white"
         font.pixelSize: 9; font.weight: Font.Bold
       }
       SequentialAnimation {
-        running: badge.visible
+        running: badge.visible && !Notifications.State.reducedMotion
         PropertyAction { target: badge; property: "scale"; value: 0 }
         PauseAnimation { duration: 220 }
         NumberAnimation { target: badge; property: "scale"; to: 1; duration: 360; easing.type: Easing.OutBack; easing.overshoot: 2.2 }
