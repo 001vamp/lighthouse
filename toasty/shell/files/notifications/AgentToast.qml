@@ -70,8 +70,11 @@ Item {
       : approval ? String(notification.summary || "Wants to use a tool")
       : kind === "paused" && notification.reason && notification.reason !== "Interrupted" ? notification.reason
       : previewText(messageText).trim()
-  readonly property string moreText: [code ? "" : preview, notification.details || code].filter(v => v).join("\n\n")
-  readonly property bool canExpand: !away && (previewLine.truncated || codeText.truncated || !!notification.details)
+  // More shows the whole message, even when a short reason stands in for it in the preview.
+  readonly property string fullText: approval ? preview : previewText(messageText).trim()
+  readonly property string moreText: [code ? "" : fullText, notification.details || code].filter(v => v).join("\n\n")
+  readonly property bool canExpand: !away && (previewLine.truncated || codeText.truncated || !!notification.details
+                                              || (!code && fullText !== "" && fullText !== preview))
   readonly property bool held: hover.hovered || card.activeFocus || focusWithin(card)
       || field.text.length > 0 || expanded
   function focusWithin(item) {
