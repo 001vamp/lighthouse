@@ -91,15 +91,9 @@ def mark_failed(error):
 
 SESSIONS = os.path.join(RUNTIME, 'sessions.json')
 
-def set_session(data, project, state, only_from=None):
-    """Report a session's state to the agent dock (None = it ended). Kitty sessions are
-    skipped: the dock reads those from their window title."""
-    sid = data.get('session_id')
-    if not sid or os.environ.get('KITTY_WINDOW_ID'):
-        return
+def update_sessions(edit):
+    """Change sessions.json under its lock. `edit` changes the dict in place; False = no write."""
     import fcntl
-    # Async events may wait on the one-time T3 lookup; the others reuse what's already known.
-    t3 = t3_thread(sid, data.get('hook_event_name') in ('SessionStart', 'UserPromptSubmit', 'PostToolUse'))
     with open(SESSIONS + '.lock', 'w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
@@ -107,32 +101,56 @@ def set_session(data, project, state, only_from=None):
                 sessions = json.load(f)
         except (OSError, ValueError):
             sessions = {}
-        current = sessions.get(sid, {}).get('state')
-        if (only_from and current not in only_from) \
-                or (state is None and sid not in sessions):
+        if edit(sessions) is False:
             return
-        if state is None:
-            del sessions[sid]
-        else:
-            previous = sessions.get(sid, {})
-            sessions[sid] = {**previous, 'agent': 'Claude Code', 'project': project, 'state': state, 'revision': uuid.uuid4().hex,
-                             'time': int(time.time()),
-                             'app': 'com.anthropic.Claude' if os.environ.get('CLAUDE_CODE_DESKTOP_APP_VERSION') else ''}
-            with_t3(sessions[sid], t3)
-        if state is not None:
-            event = data.get('hook_event_name')
-            if event == 'UserPromptSubmit' and (not previous.get('task') or previous.get('task', '').strip().lower() in ('hi', 'hello', 'ok', 'yes', 'continue', 'do tht', 'do that', 'do it')):
-                sessions[sid]['task'] = data.get('prompt') if isinstance(data.get('prompt'), str) else ''
-            if event == 'SessionStart' and current:
-                sessions[sid]['state'] = current
-            detail = data.get('error_details') or data.get('last_assistant_message') or data.get('message') or ''
-            sessions[sid]['reason'] = ('Usage limit reached' if state == 'paused' and usage_limited(detail) else
-                'Interrupted' if event == 'Interrupt' else
-                'Could not finish; open the session for details' if state == 'failed' else '')
         tmp = f'{SESSIONS}.{os.getpid()}'
         with open(tmp, 'w') as f:
             json.dump(sessions, f)
         os.replace(tmp, SESSIONS)
+
+def set_session(data, project, state, only_from=None):
+    """Report a session's state to the agent dock (None = it ended). Kitty sessions are
+    skipped: the dock reads those from their window title."""
+    sid = data.get('session_id')
+    if not sid or os.environ.get('KITTY_WINDOW_ID'):
+        return
+    event = data.get('hook_event_name')
+    t3 = t3_thread(sid, False)
+
+    def edit(sessions):
+        current = sessions.get(sid, {}).get('state')
+        if (only_from and current not in only_from) \
+                or (state is None and sid not in sessions):
+            return False
+        if state is None:
+            del sessions[sid]
+            return
+        previous = sessions.get(sid, {})
+        sessions[sid] = {**previous, 'agent': 'Claude Code', 'project': project, 'state': state, 'revision': uuid.uuid4().hex,
+                         'time': int(time.time()),
+                         'app': 'com.anthropic.Claude' if os.environ.get('CLAUDE_CODE_DESKTOP_APP_VERSION') else ''}
+        with_t3(sessions[sid], t3)
+        if event == 'UserPromptSubmit' and (not previous.get('task') or previous.get('task', '').strip().lower() in ('hi', 'hello', 'ok', 'yes', 'continue', 'do tht', 'do that', 'do it')):
+            sessions[sid]['task'] = data.get('prompt') if isinstance(data.get('prompt'), str) else ''
+        if event == 'SessionStart' and current:
+            sessions[sid]['state'] = current
+        detail = data.get('error_details') or data.get('last_assistant_message') or data.get('message') or ''
+        sessions[sid]['reason'] = ('Usage limit reached' if state == 'paused' and usage_limited(detail) else
+            'Interrupted' if event == 'Interrupt' else
+            'Could not finish; open the session for details' if state == 'failed' else '')
+    update_sessions(edit)
+
+    # A T3 Code session's thread is looked up once, after its state is written, so the
+    # lookup never holds back (or lands after) a newer state. Only async events wait on it.
+    if t3 is None and state is not None and event in ('SessionStart', 'UserPromptSubmit', 'PostToolUse'):
+        found = t3_thread(sid, True)
+
+        def attach(sessions):
+            if sid not in sessions or 't3' in sessions[sid]:
+                return False
+            with_t3(sessions[sid], found)
+        if found is not None:
+            update_sessions(attach)
 
 def notify(data, *args):
     cmd = [NOTIFY, '--agent', 'Claude Code', '--provider', 'Anthropic', '--detach']
