@@ -15,7 +15,7 @@ Never blocks Claude: toasty-notify is started detached and this always exits 0.
 """
 import json, os, re, subprocess, sys, time, uuid
 
-from toastylib import other_app_sessions
+from toastylib import other_app_sessions, t3_thread, with_t3
 
 NOTIFY = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toasty-notify')
 RUNTIME = os.path.join(os.environ.get('XDG_RUNTIME_DIR') or f'/tmp/toasty-{os.getuid()}', 'toasty')
@@ -98,6 +98,8 @@ def set_session(data, project, state, only_from=None):
     if not sid or os.environ.get('KITTY_WINDOW_ID'):
         return
     import fcntl
+    # Async events may wait on the one-time T3 lookup; the others reuse what's already known.
+    t3 = t3_thread(sid, data.get('hook_event_name') in ('SessionStart', 'UserPromptSubmit', 'PostToolUse'))
     with open(SESSIONS + '.lock', 'w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
@@ -116,6 +118,7 @@ def set_session(data, project, state, only_from=None):
             sessions[sid] = {**previous, 'agent': 'Claude Code', 'project': project, 'state': state, 'revision': uuid.uuid4().hex,
                              'time': int(time.time()),
                              'app': 'com.anthropic.Claude' if os.environ.get('CLAUDE_CODE_DESKTOP_APP_VERSION') else ''}
+            with_t3(sessions[sid], t3)
         if state is not None:
             event = data.get('hook_event_name')
             if event == 'UserPromptSubmit' and (not previous.get('task') or previous.get('task', '').strip().lower() in ('hi', 'hello', 'ok', 'yes', 'continue', 'do tht', 'do that', 'do it')):

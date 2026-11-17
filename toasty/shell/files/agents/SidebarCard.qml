@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Shapes
 import Quickshell
 import Quickshell.Io
 import ".." as Shell
@@ -16,7 +17,6 @@ import "../notifications" as Notifications
 // it; then a terminal row settles to Idle. App rows clear only when individually opened or dismissed.
 Shell.Card {
   id: root
-  color: "#29272D"
   property real collapseProgress: 0
   readonly property real widthProgress: Shell.Theme.collapseWidth(collapseProgress)
   readonly property real heightProgress: Shell.Theme.collapseHeight(collapseProgress)
@@ -187,7 +187,7 @@ Shell.Card {
       if (match) root.knownAgent[w.id] = match.agent;
       const agent = root.knownAgent[w.id] || running;
       list.push({
-        key: "win:" + w.id, reportJson: "", winId: w.id, app: "", link: "", state, leaving: false,
+        key: "win:" + w.id, reportJson: "", winId: w.id, app: "", link: "", state, leaving: false, kind: "", count: "",
         name: agent ? agent.name : "Agent",
         icon: agent ? agent.mascot || "ghost.png" : "ghost.png",
         task: shortTitle(match ? context(title.replace(/^(\[\s*[!.]\s*\]|[⠀-⣿◐◑✳])\s*/, "")) : "", (agent ? agent.name : "Agent") + " session"),
@@ -197,6 +197,20 @@ Shell.Card {
     }
     root.lastRaw = raw;
 
+    // Sessions an orchestrator spawned (T3 Code, today) fold into one job row per orchestrator
+    // thread. The orchestrator's own session is the job row; only children that need you
+    // get a row of their own, right under it.
+    const jobs = {};
+    const owners = {};
+    for (const sid in root.sessions) {
+      const t3 = root.sessions[sid].t3 || {};
+      if (t3.job && t3.job.id) (jobs[t3.job.id] = jobs[t3.job.id] || { job: t3.job, children: [] }).children.push(sid);
+    }
+    for (const sid in root.sessions) {
+      const t3 = root.sessions[sid].t3 || {};
+      if (t3.thread && jobs[t3.thread]) owners[t3.thread] = sid;
+    }
+    const sessionRows = {};
     for (const sid in root.sessions) {
       const s = root.sessions[sid];
       const at = (s.time || 0) * 1000;
@@ -205,12 +219,39 @@ Shell.Card {
       if (!["ready", "done", "working", "waiting", "paused", "failed", "unknown"].includes(state)) continue;
       const agent = Notifications.State.agent(s.agent) || {};
       const name = agent.name || s.agent || "Agent";
-      list.push({ key: "session:" + sid, reportJson: JSON.stringify(s), winId: -1, app: s.app || "", link: s.open || "",
-                  state, leaving, name, icon: agent.mascot || "ghost.png",
+      const job = (s.t3 || {}).job;
+      sessionRows[sid] = { key: "session:" + sid, reportJson: JSON.stringify(s), winId: -1, app: s.app || "", link: s.open || "",
+                  state, leaving, name, icon: agent.mascot || "ghost.png", kind: job && job.id ? "child" : "", count: "",
                   task: shortTitle(s.task, name + (context(s.project) ? " · " + context(s.project) : " session")),
                   fullTask: (readable(s.task) || "") + (context(s.project) ? "\nProject: " + context(s.project) : ""),
-                  detail: explanation(state, state === "unknown" ? "" : readable(s.reason), false) });
+                  detail: explanation(state, state === "unknown" ? "" : readable(s.reason), false) };
     }
+    const childRows = {};
+    for (const id in jobs) {
+      const members = jobs[id].children.filter(sid => sessionRows[sid]);
+      const owner = sessionRows[owners[id]];
+      const all = (owner ? [owner] : []).concat(members.map(sid => sessionRows[sid]));
+      if (!members.length) continue;
+      const states = all.map(r => r.state);
+      const has = st => states.includes(st);
+      const state = has("waiting") ? "waiting" : has("working") ? "working" : has("failed") ? "failed"
+          : has("paused") ? "paused" : has("unknown") ? "unknown" : has("ready") ? "ready" : "done";
+      const finished = members.filter(sid => sessionRows[sid].state === "done").length;
+      const reports = {};
+      for (const sid of members.concat(owner ? [owners[id]] : [])) reports[sid] = root.sessions[sid];
+      const title = shortTitle(jobs[id].job.title, "Agent job");
+      list.push({ key: "job:" + id, reportJson: JSON.stringify(reports), winId: -1, app: "", link: jobs[id].job.open || (owner ? owner.link : ""),
+                  state, leaving: false, name: title, icon: owner ? owner.icon : sessionRows[members[0]].icon,
+                  kind: "job", count: members.some(sid => sessionRows[sid].state === "working") ? finished + "/" + members.length : "",
+                  task: title,
+                  fullTask: (readable(jobs[id].job.title) || "Agent job") + "\n" + members.length + (members.length === 1 ? " agent: " : " agents: ")
+                      + members.map(sid => sessionRows[sid].name + " " + root.label(sessionRows[sid].state).toLowerCase()).join(", "),
+                  detail: finished + " of " + members.length + " finished" + (has("waiting") ? " · one needs you" : "") });
+      childRows["job:" + id] = members.filter(sid => ["waiting", "failed", "paused"].includes(sessionRows[sid].state)).map(sid => sessionRows[sid]);
+      for (const sid of members) delete sessionRows[sid];
+      if (owner) delete sessionRows[owners[id]];
+    }
+    for (const sid in sessionRows) list.push(sessionRows[sid]);
     // Distinguish legacy sessions that supplied no task without exposing IDs.
     const totals = {}, seen = {};
     for (const item of list) totals[item.task] = (totals[item.task] || 0) + 1;
@@ -222,8 +263,11 @@ Shell.Card {
     const positions = {};
     for (let i = 0; i < rows.count; i++) positions[rows.get(i).key] = i;
     list.sort((a, b) => (positions[a.key] ?? rows.count) - (positions[b.key] ?? rows.count));
+    // A job's children that need you sit right under it.
+    const ordered = [];
+    for (const item of list) ordered.push(item, ...(childRows[item.key] || []));
     root.ticking = ticking;
-    sync(list);
+    sync(ordered);
   }
 
   // Update rows in place so a row keeps its delegate (and only animates when it changes).
@@ -254,6 +298,13 @@ Shell.Card {
   }
 
   function dismiss(key, expectedReport) {
+    if (key.startsWith("job:")) {
+      let reports = {};
+      try { reports = JSON.parse(expectedReport || "{}"); } catch (e) {}
+      let any = false;
+      for (const sid in reports) any = dismiss("session:" + sid, JSON.stringify(reports[sid])) || any;
+      return any;
+    }
     if (!key.startsWith("session:")) return false;
     const sid = key.slice(8), report = root.sessions[sid];
     if (!report) return false;
@@ -290,7 +341,7 @@ Shell.Card {
   }
 
   function open(row) {
-    if (row.key.startsWith("session:") && row.state === "done") dismiss(row.key, row.reportJson);
+    if ((row.key.startsWith("session:") || row.key.startsWith("job:")) && row.state === "done") dismiss(row.key, row.reportJson);
     if (row.link) Qt.openUrlExternally(row.link);
     else if (row.app) Shell.NiriMsg.focusApp(row.name, row.app);
     else Shell.NiriMsg.focusWindow(row.winId);
@@ -331,8 +382,12 @@ Shell.Card {
       required property string fullTask
       required property string task
       required property string detail
+      required property string kind    // "job": an orchestrator's agents; "child": one of them
+      required property string count   // a job's finished/total agents
       readonly property string status: state
-      readonly property bool dismissible: key.startsWith("session:") && state !== "working" && state !== "waiting"
+      readonly property bool dismissible: (key.startsWith("session:") || kind === "job") && state !== "working" && state !== "waiting"
+      // Children sit a step in, under their job.
+      readonly property int indent: kind === "child" ? Math.round(14 * (1 - root.widthProgress)) : 0
       y: 4 + index * root.rowHeight
       Behavior on y { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
       width: root.width
@@ -445,6 +500,34 @@ Shell.Card {
         }
       }
 
+      // A job reads as a group, never as one agent: dashed outline, and its mascot on a stack.
+      Shape {
+        id: jobOutline
+        visible: row.kind === "job"
+        opacity: 1 - root.widthProgress
+        x: 4; y: 2
+        width: parent.width - 8; height: parent.height - 4
+        preferredRendererType: Shape.CurveRenderer
+        ShapePath {
+          strokeColor: Qt.rgba(1, 1, 1, 0.22)
+          strokeWidth: 1
+          strokeStyle: ShapePath.DashLine
+          dashPattern: [3, 3]
+          fillColor: "transparent"
+          PathRectangle { x: 0.5; y: 0.5; width: jobOutline.width - 1; height: jobOutline.height - 1; radius: 10 }
+        }
+      }
+      Repeater {
+        model: row.kind === "job" ? [0.07, 0.13] : []
+        Rectangle {
+          required property real modelData
+          required property int index
+          x: mascot.x + 2 + (2 - index) * 3; y: mascot.y + 2 - (2 - index) * 3
+          width: 24; height: 24; radius: 7
+          color: Qt.rgba(1, 1, 1, modelData)
+        }
+      }
+
       Rectangle {
         x: 4; y: 2
         width: parent.width - 8; height: parent.height - 4
@@ -457,7 +540,7 @@ Shell.Card {
       // Mascot: centred when collapsed, with a status dot standing in for the pill.
       Image {
         id: mascot
-        x: Shell.Theme.lerp(10, (root.width - width) / 2, root.widthProgress)
+        x: Shell.Theme.lerp(10, (root.width - width) / 2, root.widthProgress) + row.indent
         anchors.verticalCenter: parent.verticalCenter
         width: 28; height: 28
         transform: Translate { id: hop }
@@ -477,7 +560,7 @@ Shell.Card {
       }
 
       Column {
-        x: 44
+        x: 44 + row.indent
         anchors.verticalCenter: parent.verticalCenter
         width: parent.width - x - 8
         spacing: 2
@@ -500,7 +583,8 @@ Shell.Card {
             spacing: 4
             Text {
               anchors.verticalCenter: parent.verticalCenter
-              text: row.winId >= 0 && row.status === "done" ? "Ended" : root.label(row.status)
+              text: row.winId >= 0 && row.status === "done" ? "Ended"
+                  : root.label(row.status) + (row.count ? " " + row.count : "")
               color: row.status === "idle" ? "#5C5760" : root.pillInk(row.status)
               font.family: Shell.Theme.fontFamily; font.pixelSize: 11; font.weight: Font.DemiBold
             }
