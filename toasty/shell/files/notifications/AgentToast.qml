@@ -54,6 +54,7 @@ Item {
   property bool expanded: false
   readonly property var awayLines: away ? notification.lines || [] : []
   property bool allAway: false
+  property bool echoing: false   // the "Sent" echo is on screen and holds the toast
   readonly property bool approval: kind === "needs" && (actions.some(a => a.identifier === "allow") || notification.codeComplete === false)
   readonly property bool navigable: !!(notification.openUrl || notification.windowId || notification.desktopEntry)
   // Slim layout: one headline ("Claude finished · lighthouse"), a short preview, and links.
@@ -166,6 +167,7 @@ Item {
       confirm.running = true;
     } else {
       delivery = "sent";
+      root.echoing = true; echoHold.restart();
       sentClose.forId = shownId;
       sentClose.start();
     }
@@ -175,7 +177,7 @@ Item {
   Binding {
     target: Notifications.State
     property: "replyHeld"
-    value: root.visible && (field.text.length > 0 || field.activeFocus || root.delivery === "sending")
+    value: root.visible && (field.text.length > 0 || field.activeFocus || root.delivery === "sending" || root.echoing)
     restoreMode: Binding.RestoreValue
   }
 
@@ -196,6 +198,8 @@ Item {
     actionProbe.running = false;
     confirm.running = false;
     sentClose.stop();
+    echoHold.stop();
+    echoing = false;
     delivery = "";
     sentText = "";
     expanded = false;
@@ -248,7 +252,7 @@ Item {
       // urgent may take its place at once.
       if (code !== 0) Notifications.State.failedReplies = Object.assign({}, Notifications.State.failedReplies, { [forEvent]: root.sentText });
       root.delivery = code === 0 ? "sent" : "failed";
-      if (code === 0) { pickup.forId = forId; pickup.since = Date.now(); pickup.start(); }
+      if (code === 0) { root.echoing = true; echoHold.restart(); pickup.forId = forId; pickup.since = Date.now(); pickup.start(); }
     }
   }
 
@@ -842,6 +846,14 @@ Item {
         sentClose.start();
       }
     }
+  }
+  // "Sent" stays up long enough to read, even with something urgent waiting; then, if anything
+  // is waiting, this toast's job is done and it makes way instead of coming back later.
+  Timer {
+    id: echoHold
+    interval: 1200
+    // Dismiss first, then let go: letting go first would send this toast back into the line.
+    onTriggered: { if (Notifications.State.queue.length) root.dismissed(); root.echoing = false; }
   }
   Timer {
     id: sentClose
