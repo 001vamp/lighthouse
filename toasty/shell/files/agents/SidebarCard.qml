@@ -192,7 +192,7 @@ Shell.Card {
       if (match) root.knownAgent[w.id] = match.agent;
       const agent = root.knownAgent[w.id] || running;
       list.push({
-        key: "win:" + w.id, reportJson: "", winId: w.id, app: "", link: "", state, leaving: false, kind: "", count: "", stale: false,
+        key: "win:" + w.id, reportJson: "", winId: w.id, app: "", link: "", state, leaving: false, kind: "", count: "", stale: false, byIcon: "",
         name: agent ? agent.name : "Agent",
         icon: agent ? agent.mascot || "ghost.png" : "ghost.png",
         task: shortTitle(match ? context(title.replace(/^(\[\s*[!.]\s*\]|[⠀-⣿◐◑✳])\s*/, "")) : "", (agent ? agent.name : "Agent") + " session"),
@@ -203,8 +203,8 @@ Shell.Card {
     root.lastRaw = raw;
 
     // Sessions an orchestrator spawned (T3 Code, today) fold into one job row per orchestrator
-    // thread. The orchestrator's own session is the job row; only children that need you
-    // get a row of their own, right under it.
+    // thread. The orchestrator stays an agent row of its own; the job is only what it started,
+    // and says who started it. Only children that need you get a row, right under the job.
     const jobs = {};
     const owners = {};
     for (const sid in root.sessions) {
@@ -227,7 +227,7 @@ Shell.Card {
       const name = agent.name || s.agent || "Agent";
       const job = (s.t3 || {}).job;
       sessionRows[sid] = { key: "session:" + sid, reportJson: JSON.stringify(s), winId: -1, app: s.app || "", link: s.open || "",
-                  state, leaving, name, icon: agent.mascot || "ghost.png", kind: job && job.id ? "child" : "", count: "",
+                  state, leaving, name, icon: agent.mascot || "ghost.png", byIcon: "", kind: job && job.id ? "child" : "", count: "",
                   stale: state === "waiting" && now - at > root.statusFreshness,
                   task: shortTitle(s.task, name + (context(s.project) ? " · " + context(s.project) : " session")),
                   fullTask: (readable(s.task) || "") + (context(s.project) ? "\nProject: " + context(s.project) : ""),
@@ -238,7 +238,7 @@ Shell.Card {
     for (const id in jobs) {
       const members = jobs[id].children.filter(sid => sessionRows[sid]);
       const owner = sessionRows[owners[id]];
-      const all = (owner ? [owner] : []).concat(members.map(sid => sessionRows[sid]));
+      const all = members.map(sid => sessionRows[sid]);
       if (!members.length) continue;
       const states = all.map(r => r.state);
       const has = st => states.includes(st);
@@ -248,18 +248,18 @@ Shell.Card {
       const waiting = members.filter(sid => sessionRows[sid].state === "waiting").length;
       const finished = members.filter(sid => sessionRows[sid].state === "done").length;
       const reports = {};
-      for (const sid of members.concat(owner ? [owners[id]] : [])) reports[sid] = root.sessions[sid];
+      for (const sid of members) reports[sid] = root.sessions[sid];
       const title = shortTitle(jobs[id].job.title, "Agent job");
+      const starter = owner ? owner.name : "";
       list.push({ key: "job:" + id, reportJson: JSON.stringify(reports), winId: -1, app: "", link: jobs[id].job.open || (owner ? owner.link : ""),
-                  state, leaving: false, name: title, icon: owner ? owner.icon : sessionRows[members[0]].icon,
+                  state, leaving: false, name: title, icon: sessionRows[members[0]].icon, byIcon: owner ? owner.icon : "",
                   kind: "job", stale: all.every(r => r.state !== "waiting" || r.stale), count: members.some(sid => sessionRows[sid].state === "working") ? finished + "/" + members.length : "",
                   task: title,
-                  fullTask: (readable(jobs[id].job.title) || "Agent job") + "\n" + members.length + (members.length === 1 ? " agent: " : " agents: ")
+                  fullTask: (starter ? "Started by " + starter + " in “" : "Started in “") + (readable(jobs[id].job.title) || "Agent job") + "”\n" + members.length + (members.length === 1 ? " agent: " : " agents: ")
                       + members.map(sid => sessionRows[sid].name + " " + root.label(sessionRows[sid].state).toLowerCase()).join(", "),
                   detail: finished + " of " + members.length + " agents finished" + (waiting ? " · " + waiting + (waiting === 1 ? " needs you" : " need you") : "") });
       childRows["job:" + id] = members.filter(sid => ["waiting", "failed", "paused"].includes(sessionRows[sid].state)).map(sid => sessionRows[sid]);
       for (const sid of members) delete sessionRows[sid];
-      if (owner) delete sessionRows[owners[id]];
     }
     for (const sid in sessionRows) list.push(sessionRows[sid]);
     // Distinguish legacy sessions that supplied no task without exposing IDs.
@@ -411,6 +411,7 @@ Shell.Card {
       required property bool leaving
       required property string name
       required property string icon
+      required property string byIcon  // a job's: the mascot of the agent that started it
       required property string fullTask
       required property string task
       required property string detail
@@ -633,15 +634,36 @@ Shell.Card {
             }
           }
         }
-        Text {
+        // A job says who started it: "from" and that agent's mascot, then the thread's title.
+        Row {
           width: parent.width
-          text: row.task
-          textFormat: Text.PlainText
-          wrapMode: Text.Wrap
-          maximumLineCount: 2
-          elide: Text.ElideRight
-          color: "#F0EDF2"
-          font.family: Shell.Theme.fontFamily; font.pixelSize: 11
+          spacing: 4
+          Text {
+            id: fromLabel
+            visible: row.byIcon !== ""
+            text: "from"
+            color: "#A9A3AD"
+            font.family: Shell.Theme.fontFamily; font.pixelSize: 11
+          }
+          Image {
+            id: fromIcon
+            visible: row.byIcon !== ""
+            y: 1
+            width: 12; height: 12
+            source: row.byIcon ? Qt.resolvedUrl("../assets/agents/" + row.byIcon) : ""
+            sourceSize: Qt.size(24, 24)
+            fillMode: Image.PreserveAspectFit
+          }
+          Text {
+            width: parent.width - (fromLabel.visible ? fromLabel.implicitWidth + fromIcon.width + 8 : 0)
+            text: row.task
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            maximumLineCount: row.byIcon !== "" ? 1 : 2
+            elide: Text.ElideRight
+            color: "#F0EDF2"
+            font.family: Shell.Theme.fontFamily; font.pixelSize: 11
+          }
         }
       }
     }
