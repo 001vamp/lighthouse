@@ -7,7 +7,7 @@ Every run is logged, so we can tell which Codex frontends actually call this.
 """
 import glob, json, os, re, subprocess, sys, time
 
-from toastylib import in_desktop_app, other_app_sessions
+from toastylib import in_desktop_app, other_app_sessions, t3_open
 
 NOTIFY = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toasty-notify')
 LOG = os.path.join(os.environ.get('XDG_STATE_HOME', os.path.expanduser('~/.local/state')),
@@ -21,15 +21,6 @@ def saved_thread(thread):
     home = os.environ.get('CODEX_HOME') or os.path.expanduser('~/.codex')
     return any(glob.glob(os.path.join(home, folder, '**', f'rollout-*-{glob.escape(thread)}.jsonl'), recursive=True)
                for folder in ('sessions', 'archived_sessions'))
-
-def t3_open(thread):
-    """The T3 Code link for a Codex session T3 started (toasty-codex-status records it)."""
-    try:
-        with open(os.path.join(RUNTIME, 'sessions.json')) as f:
-            link = (json.load(f).get(thread, {}).get('t3') or {}).get('open')
-    except (OSError, ValueError, AttributeError):
-        return ''
-    return link if isinstance(link, str) else ''
 
 def log(msg):
     try:
@@ -47,8 +38,12 @@ try:
     if payload.get('type') == 'agent-turn-complete' and thread and not saved_thread(thread):
         log(f'skipped: {thread} is not a saved thread')
     elif payload.get('type') == 'agent-turn-complete':
-        subprocess.run([os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toasty-codex-status')],
-                       input=json.dumps(payload), text=True, timeout=3)
+        try:
+            subprocess.run([os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toasty-codex-status')],
+                           input=json.dumps(payload), text=True, timeout=3)
+        except subprocess.TimeoutExpired:
+            # A slow T3 lookup must never cost the toast: the state was written first.
+            log('status hook timed out; toasting anyway')
         project = os.path.basename(payload.get('cwd') or os.getcwd()) or 'Codex'
         text = str(payload.get('last-assistant-message') or '').strip()
         message = (text[:16000] + ('\n\nPreview limit reached. Open session for the full reply.' if len(text) > 16000 else '')) or 'Finished its turn.'

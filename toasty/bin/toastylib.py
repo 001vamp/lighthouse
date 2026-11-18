@@ -102,6 +102,16 @@ def t3_thread(session, lookup, thread=None):
     return info
 
 
+def t3_open(session):
+    """The T3 Code link toasty-codex-status saved for a session T3 started; '' otherwise."""
+    try:
+        with open(os.path.join(RUNTIME, 'sessions.json')) as f:
+            link = (json.load(f).get(session, {}).get('t3') or {}).get('open')
+    except (OSError, ValueError, AttributeError):
+        return ''
+    return link if isinstance(link, str) else ''
+
+
 def with_t3(entry, info):
     """Point a session's dock row at its T3 thread instead of the app it runs under."""
     if info:

@@ -327,6 +327,16 @@ class Hooks(Env):
         self.assertEqual(n['actions'], [], 'no Allow/Deny to wait on')
         self.assertEqual(n['hints']['x-toasty-open'], 'codex://threads/s')
 
+    def test_codex_permission_in_t3_opens_t3(self):
+        os.makedirs(os.path.join(self.runtime, 'toasty'), exist_ok=True)
+        with open(os.path.join(self.runtime, 'toasty', 'sessions.json'), 'w') as f:
+            json.dump({'s': {'agent': 'Codex', 'state': 'working', 't3': {'thread': 'kid', 'open': 't3code://threads/E/kid'}}}, f)
+        self.run_hook('toasty-codex-permission', {'hook_event_name': 'PermissionRequest', 'session_id': 's', 'cwd': '/w',
+                                                  'tool_name': 'Bash', 'tool_input': {'command': 'npm test'}})
+        n = wait_for(lambda: self.calls('Notify') and self.calls('Notify')[-1])
+        self.assertEqual(n['hints']['x-toasty-open'], 't3code://threads/E/kid', 'Needs you opens the T3 thread too')
+        self.assertIn('T3 Code', n['body'])
+
     def test_codex_permission_allow_and_deny(self):
         payload = {'hook_event_name': 'PermissionRequest', 'session_id': 's', 'cwd': '/w', 'tool_name': 'Bash',
                    'tool_input': {'command': 'npm test'}}

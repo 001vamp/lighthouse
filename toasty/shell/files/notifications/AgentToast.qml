@@ -183,7 +183,10 @@ Item {
   onNotificationChanged: {
     const event = String((notification || {}).id || "") + ":" + String((notification || {}).eventRevision || "");
     if (event === shownEvent) return;
+    // A new revision of the toast you're replying in updates its text but keeps your draft.
+    const sameCard = String((notification || {}).id || "") === shownId;
     shownEvent = event;
+    if (sameCard && (field.text.length > 0 || delivery === "sending")) return;
     shownId = (notification || {}).id || "";
     // Anything still in flight belongs to the previous notification.
     probe.running = false;
@@ -434,6 +437,7 @@ Item {
       // Four lines at most; "+N more" shows the rest in a list that scrolls past five.
       Item { width: 1; height: 4; visible: root.away }
       Flickable {
+        id: awayFlick
         visible: root.away
         width: parent.width
         // Stops partway through a row, so a list that scrolls looks like one.
@@ -456,6 +460,12 @@ Item {
             color: lineArea.containsMouse || activeFocus ? root.hoverFill : "transparent"
             opacity: opened ? 0.5 : 1
             activeFocusOnTab: true
+            // Tabbing into a row the list has scrolled past brings the whole row into view.
+            onActiveFocusChanged: if (activeFocus) {
+              const flick = awayFlick;
+              if (y < flick.contentY) flick.contentY = y;
+              else if (y + height > flick.contentY + flick.height) flick.contentY = y + height - flick.height;
+            }
             border.width: activeFocus ? 2 : 0
             border.color: root.focusRing
             Accessible.role: Accessible.Button
