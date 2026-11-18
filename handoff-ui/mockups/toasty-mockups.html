@@ -155,6 +155,52 @@ header p{margin:0;color:var(--sub);font-size:14px;max-width:70ch;line-height:1.5
 .ring img{width:32px;height:32px;position:absolute;inset:0}
 .ring svg{position:absolute;inset:-4px;width:40px;height:40px}
 
+
+/* ---------- E: Glass ---------- */
+.toast.glass{background:rgba(30,28,34,.72);color:var(--text);backdrop-filter:blur(18px) saturate(1.3);-webkit-backdrop-filter:blur(18px) saturate(1.3);box-shadow:inset 0 0 0 1px rgba(255,255,255,.08),0 6px 24px rgba(0,0,0,.35)}
+.toast.glass .slim-sub{color:var(--sub)}
+.toast.glass .link{color:var(--text)}.toast.glass .link:hover{background:rgba(255,255,255,.08)}
+.toast.glass .reply{background:rgba(255,255,255,.07);color:var(--dim)}
+.toast.glass .reply .send{background:var(--text)}
+.toast.glass .codebox{background:rgba(0,0,0,.3);color:#E9E4EC}
+.toast.glass .countdown{background:var(--text)}
+.toast.glass.edge-needs{box-shadow:inset 3px 0 0 var(--needs),inset 0 0 0 1px rgba(255,255,255,.08),0 6px 24px rgba(0,0,0,.35)}
+.toast.glass.edge-failed{box-shadow:inset 3px 0 0 var(--failed),inset 0 0 0 1px rgba(255,255,255,.08),0 6px 24px rgba(0,0,0,.35)}
+.wall{border-radius:16px;padding:18px;background:radial-gradient(120% 90% at 10% 0%,#5B3E7A 0%,transparent 55%),radial-gradient(90% 80% at 100% 100%,#1E4F6B 0%,transparent 60%)}
+/* ---------- F: Quick replies ---------- */
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0 0 34px}
+.chip{font:600 12px Onest;height:28px;padding:0 12px;border-radius:14px;border:1px solid rgba(0,0,0,.14);background:transparent;color:var(--ink);cursor:pointer}
+.chip:hover{background:rgba(0,0,0,.07)}
+.sent{margin:8px 0 0 34px;display:flex;justify-content:flex-end}
+.sent span{background:var(--ink);color:var(--surface);font-size:12px;padding:6px 10px;border-radius:12px 12px 4px 12px;max-width:80%}
+.sent-meta{margin:4px 0 0 34px;text-align:right;font-size:10px;color:var(--muted)}
+/* ---------- G: Job open ---------- */
+.jobcard{margin:2px 4px 6px;border-radius:10px;background:rgba(255,255,255,.03);outline:1.5px dashed #47424D;outline-offset:-1px;padding:4px 0 6px}
+.jobcard .row.job{outline:0;margin:0}
+.mem{display:flex;align-items:center;gap:8px;height:30px;padding:0 10px 0 20px;font-size:11px;color:var(--text);border-radius:8px;margin:0 4px;cursor:pointer}
+.mem:hover{background:var(--hover)}
+.mem img{width:18px;height:18px}
+.mem .st{margin-left:auto;font-size:10px;font-weight:600;color:var(--sub)}
+.mem .st.n{color:var(--needs)}.mem .st.d{color:#6FA0FF}.mem .st.f{color:#FF6B6B}
+.mem .tree{width:8px;height:14px;border-left:1.5px solid #47424D;border-bottom:1.5px solid #47424D;border-bottom-left-radius:4px;margin-top:-8px;flex:none}
+/* ---------- H: Rail ---------- */
+.rail{width:52px;background:var(--card);border-radius:12px;padding:6px 0;display:flex;flex-direction:column;align-items:center;gap:6px;box-shadow:0 2px 14px rgba(0,0,0,.35)}
+.rbtn{position:relative;width:40px;height:40px;border-radius:10px;display:grid;place-items:center;cursor:pointer}
+.rbtn:hover{background:var(--hover)}
+.rbtn img{width:28px;height:28px}
+.rbtn .b{position:absolute;right:3px;bottom:3px;width:11px;height:11px;border-radius:6px;border:2px solid var(--card)}
+.rbtn .n{position:absolute;right:-1px;top:0;min-width:16px;height:16px;border-radius:8px;background:var(--work);color:var(--ink);font-size:9px;font-weight:700;display:grid;place-items:center;padding:0 4px}
+.rbtn.jobr::before{content:"";position:absolute;inset:3px;border-radius:9px;outline:1.5px dashed #5A5460}
+.rsep{width:22px;height:1px;background:#3A3640;margin:2px 0}
+.tip{position:absolute;left:52px;top:50%;translate:0 -50%;white-space:nowrap;background:#121115;color:var(--text);font-size:11px;padding:5px 8px;border-radius:7px;pointer-events:none;opacity:0;transition:opacity .12s}
+.rbtn:hover .tip{opacity:1}
+/* ---------- I: Digest ---------- */
+.dg-list{margin:8px 0 0 34px;display:flex;flex-direction:column;gap:2px}
+.dg{display:flex;align-items:center;gap:8px;height:28px;padding:0 6px;border-radius:7px;font-size:12px;cursor:pointer}
+.dg:hover{background:var(--btn)}
+.dg img{width:18px;height:18px}
+.dg .r{margin-left:auto;color:var(--muted);font-size:11px}
+
 @media (prefers-reduced-motion:reduce){*{animation:none!important}}
 </style>
 </head>
@@ -165,16 +211,21 @@ header p{margin:0;color:var(--sub);font-size:14px;max-width:70ch;line-height:1.5
 </header>
 
 <div class="tabs" role="tablist">
-  <button class="tab" role="tab" aria-selected="true" data-s="combo">A + B</button>
+  <button class="tab" role="tab" aria-selected="false" data-s="combo">A + B</button>
   <button class="tab" role="tab" aria-selected="false" data-s="today">Today</button>
   <button class="tab" role="tab" aria-selected="false" data-s="jobs">A · Jobs</button>
   <button class="tab" role="tab" aria-selected="false" data-s="quiet">B · Quiet</button>
   <button class="tab" role="tab" aria-selected="false" data-s="stack">C · Stack</button>
   <button class="tab" role="tab" aria-selected="false" data-s="time">D · Waiting time</button>
+  <button class="tab" role="tab" aria-selected="true" data-s="glass">E · Glass</button>
+  <button class="tab" role="tab" aria-selected="false" data-s="chips">F · Quick replies</button>
+  <button class="tab" role="tab" aria-selected="false" data-s="jobopen">G · Job opened</button>
+  <button class="tab" role="tab" aria-selected="false" data-s="rail">H · Rail</button>
+  <button class="tab" role="tab" aria-selected="false" data-s="digest">I · Digest</button>
 </div>
 
 <!-- COMBO -->
-<section class="style on" id="combo">
+<section class="style" id="combo">
   <p class="blurb"><b>A + B.</b> A's dock with jobs and agents kept apart. An agent row is one session you can open. A job row is a group an orchestrator spawned: its mascot sits on a small stack and its row has a dashed outline, so it never reads as a single agent. B's slim toasts grow only when they have something to show.</p>
   <p class="keeps">Clicking a job opens the orchestrator's job view. Clicking an agent opens that session.</p>
   <div class="stage">
@@ -352,6 +403,138 @@ header p{margin:0;color:var(--sub);font-size:14px;max-width:70ch;line-height:1.5
           <div class="t-title">Done</div><div class="t-sub">Finished after 14 minutes.</div>
           <div class="reply">Reply to Codex…<span class="send"></span></div><div class="countdown"></div></div>
       </div>
+    </div>
+  </div>
+</section>
+
+<!-- E GLASS -->
+<section class="style on" id="glass">
+  <p class="blurb"><b>E · Glass.</b> The same slim toasts, made dark and see-through like your dock card. They blur the wallpaper behind them, so they sit with the dock instead of being bright cards on top of it. Status shows as a thin colored edge on the left instead of a full outline.</p>
+  <p class="keeps">Keeps A + B's layout. Only the toast surface changes. The colored backdrop is a stand-in for your wallpaper.</p>
+  <div class="stage wall">
+    <div class="col"><h3>Dock</h3>
+      <div class="dock" style="background:rgba(41,39,45,.72);backdrop-filter:blur(18px)">
+        <div class="row"><img class="ic breathe" data-i="claudey"><div class="meta"><span class="pill needs">Needs you <span class="age">· 4m</span></span><span class="task">pond-interface</span></div><span class="x">×</span></div>
+        <div class="sect">Jobs</div>
+        <div class="row job"><span class="jic"><img class="ic" data-i="ghost"></span><div class="meta"><span class="pill working">Working 2/4 <span class="dots"><i></i><i></i><i></i></span></span><span class="task">toasty hooks</span></div><span class="x">×</span></div>
+        <div class="sect">Agents</div>
+        <div class="row"><img class="ic" data-i="cat"><div class="meta"><span class="pill done">Done <span class="chk">✓</span></span><span class="task">iso-installer</span></div><span class="x">×</span></div>
+      </div>
+    </div>
+    <div class="col"><h3>Toasts</h3>
+      <div class="toasts">
+        <div class="toast slim glass edge-needs"><div class="t-head"><img data-i="claudey"><div class="slim-body"><div class="slim-title">Claude needs you · pond-interface</div><div class="slim-sub">Wants to run a command</div></div><button class="link">Open thread</button></div>
+          <div class="slim-grow"><div class="codebox">bin/toasty install --link</div></div></div>
+        <div class="toast slim glass"><div class="t-head"><img data-i="cat"><div class="slim-body"><div class="slim-title">Done · iso-installer</div><div class="slim-sub">Built the ISO in 4m 12s. No warnings.</div></div><button class="link">Open</button></div>
+          <div class="slim-grow"><div class="reply">Reply…<span class="send"></span></div></div><div class="countdown"></div></div>
+        <div class="toast slim glass edge-failed"><div class="t-head"><img data-i="codex"><div class="slim-body"><div class="slim-title">Codex failed · lighthouse</div><div class="slim-sub">Rate limit reached. Try again at 4:10pm.</div></div><button class="link">More</button></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- F QUICK REPLIES -->
+<section class="style" id="chips">
+  <p class="blurb"><b>F · Quick replies.</b> When an agent finishes and asks a question, the toast shows two or three suggested answers as pill buttons above the reply box. One click sends the reply. What you sent stays in the toast as a small bubble for a moment, so you know it went through.</p>
+  <p class="keeps">Uses the pill style AgentButton already has. The suggested answers would come from the agent's last message, so it only shows when the agent asked something.</p>
+  <div class="stage">
+    <div class="col"><h3>Before you reply</h3>
+      <div class="toasts">
+        <div class="toast slim"><div class="t-head"><img data-i="claudey"><div class="slim-body"><div class="slim-title">Claude finished · lighthouse</div><div class="slim-sub">Tests pass. Open a PR, or keep going on the rail?</div></div><button class="link">Open</button></div>
+          <div class="chips"><button class="chip">Open a PR</button><button class="chip">Keep going</button><button class="chip">Run council</button></div>
+          <div class="slim-grow"><div class="reply">Or type a reply…<span class="send"></span></div></div></div>
+      </div>
+    </div>
+    <div class="col"><h3>After you reply</h3>
+      <div class="toasts">
+        <div class="toast slim"><div class="t-head"><img data-i="claudey"><div class="slim-body"><div class="slim-title">Claude finished · lighthouse</div><div class="slim-sub">Tests pass. Open a PR, or keep going on the rail?</div></div><button class="link">Open</button></div>
+          <div class="sent"><span>Open a PR</span></div><div class="sent-meta">Sent · Claude is working</div><div class="countdown"></div></div>
+        <p class="subnote">Closes itself 3s after the reply goes out. The dock row flips back to Working.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- G JOB OPENED -->
+<section class="style" id="jobopen">
+  <p class="blurb"><b>G · Job opened.</b> Click a job's row and it opens in place inside the dock to list its agents, each with its own status. You can see which agent is slow or stuck without switching to T3. Click an agent to open that thread. Click the job again to close it.</p>
+  <p class="keeps">Builds on the dashed job outline you already have. Answers "which one is still going?" without making a new window.</p>
+  <div class="stage">
+    <div class="col"><h3>Dock</h3>
+      <div class="dock">
+        <div class="sect">Jobs</div>
+        <div class="jobcard">
+          <div class="row job"><span class="jic"><img class="ic" data-i="ghost"></span><div class="meta"><span class="pill working">Working 3/5 <span class="dots"><i></i><i></i><i></i></span></span><div class="seg" style="width:120px"><i class="d"></i><i class="d"></i><i class="d"></i><i class="n"></i><i class="w"></i></div></div><span class="x">×</span></div>
+          <div class="mem"><span class="tree"></span><img data-i="ghost-grok">Gemini hooks<span class="st n">Needs you · 6m</span></div>
+          <div class="mem"><span class="tree"></span><img data-i="codex">Codex status<span class="st">Working</span></div>
+          <div class="mem"><span class="tree"></span><img data-i="claudey">Claude hook<span class="st d">Done</span></div>
+          <div class="mem"><span class="tree"></span><img data-i="claudey">Protocol doc<span class="st d">Done</span></div>
+          <div class="mem"><span class="tree"></span><img data-i="cat">Tests<span class="st d">Done</span></div>
+        </div>
+        <div class="row job"><span class="jic"><img class="ic" data-i="ghost-openbot"></span><div class="meta"><span class="pill done">Done <span class="chk">✓</span></span><span class="task">6 agents · toasty docs</span></div><span class="x">×</span></div>
+        <div class="sect">Agents</div>
+        <div class="row"><img class="ic" data-i="cat"><div class="meta"><span class="pill working">Working <span class="dots"><i></i><i></i><i></i></span></span><span class="task">iso-installer</span></div><span class="x">×</span></div>
+      </div>
+    </div>
+    <div class="col"><h3>Notes</h3>
+      <p class="note">Agents that need you sort to the top of the open job. A failed agent shows in red. Hovering an agent row shows its last line, the same text its toast shows.</p>
+      <p class="note">The rest of the dock moves down while a job is open. Only one job opens at a time.</p>
+    </div>
+  </div>
+</section>
+
+<!-- H RAIL -->
+<section class="style" id="rail">
+  <p class="blurb"><b>H · Rail.</b> What the dock looks like when it's collapsed. Each agent is a mascot with a small status dot. Jobs keep their dashed outline and show how many of their agents are still running. Hover a mascot to see its name and status.</p>
+  <p class="keeps">For when you want the dock to take up almost no room. The divider keeps jobs and agents apart here too.</p>
+  <div class="stage">
+    <div class="col"><h3>Collapsed</h3>
+      <div class="rail">
+        <div class="rbtn"><img class="breathe" data-i="claudey"><span class="b" style="background:var(--needs)"></span><span class="tip">Claude · Needs you · 12m</span></div>
+        <div class="rsep"></div>
+        <div class="rbtn jobr"><img data-i="ghost"><span class="n">2</span><span class="tip">toasty hooks · 3 of 5 done</span></div>
+        <div class="rbtn jobr"><img data-i="ghost-openbot"><span class="b" style="background:var(--done)"></span><span class="tip">toasty docs · Done</span></div>
+        <div class="rsep"></div>
+        <div class="rbtn"><img data-i="codex"><span class="b" style="background:var(--failed)"></span><span class="tip">Codex · Failed</span></div>
+        <div class="rbtn"><img data-i="cat"><span class="b" style="background:var(--work)"></span><span class="tip">iso-installer · Working</span></div>
+        <div class="rbtn" style="opacity:.6"><img data-i="hermes" style="border-radius:50%;background:#F4F1F5"><span class="b" style="background:var(--paused)"></span><span class="tip">Hermes · Paused</span></div>
+      </div>
+    </div>
+    <div class="col"><h3>Open</h3>
+      <div class="dock">
+        <div class="row"><img class="ic breathe" data-i="claudey"><div class="meta"><span class="pill needs">Needs you <span class="age">· 12m</span></span><span class="task">pond-interface</span></div><span class="x">×</span></div>
+        <div class="sect">Jobs</div>
+        <div class="row job"><span class="jic"><img class="ic" data-i="ghost"></span><div class="meta"><span class="pill working">Working 3/5 <span class="dots"><i></i><i></i><i></i></span></span><span class="task">toasty hooks</span></div><span class="x">×</span></div>
+        <div class="row job"><span class="jic"><img class="ic" data-i="ghost-openbot"></span><div class="meta"><span class="pill done">Done <span class="chk">✓</span></span><span class="task">toasty docs</span></div><span class="x">×</span></div>
+        <div class="sect">Agents</div>
+        <div class="row"><img class="ic" data-i="codex"><div class="meta"><span class="pill failed">Failed <span class="bang">!</span></span><span class="task">Rate limit reached</span></div><span class="x">×</span></div>
+        <div class="row"><img class="ic" data-i="cat"><div class="meta"><span class="pill working">Working <span class="dots"><i></i><i></i><i></i></span></span><span class="task">iso-installer</span></div><span class="x">×</span></div>
+        <div class="row paused"><img class="ic" data-i="hermes" style="border-radius:50%;background:#F4F1F5"><div class="meta"><span class="pill paused">Paused</span><span class="task">Waiting for 4:10pm</span></div><span class="x">×</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- I DIGEST -->
+<section class="style" id="digest">
+  <p class="blurb"><b>I · Digest.</b> When several agents finish while you're away, they arrive as one toast instead of a pile. It lists each one on its own line, and clicking a line opens that thread. Anything that needs you still gets its own toast, so it never gets lost in the list.</p>
+  <p class="keeps">Fixes the burst of toasts when a big job ends. Only Done toasts get grouped.</p>
+  <div class="stage">
+    <div class="col"><h3>Toasts</h3>
+      <div class="toasts">
+        <div class="toast slim edge-needs"><div class="t-head"><img data-i="ghost-grok"><div class="slim-body"><div class="slim-title">Gemini hooks needs you</div><div class="slim-sub">toasty hooks job · waiting 6m</div></div><button class="link">Open thread</button></div></div>
+        <div class="toast slim"><div class="t-head"><img data-i="ghost-openbot"><div class="slim-body"><div class="slim-title">4 agents finished</div><div class="slim-sub">While you were away · 18m</div></div><button class="link">Clear</button></div>
+          <div class="dg-list">
+            <div class="dg"><img data-i="claudey">Claude hook<span class="r">PR #6 opened</span></div>
+            <div class="dg"><img data-i="claudey">Protocol doc<span class="r">2 files changed</span></div>
+            <div class="dg"><img data-i="cat">Tests<span class="r">25 passed</span></div>
+            <div class="dg"><img data-i="codex">iso-installer<span class="r">Built in 4m</span></div>
+          </div><div class="countdown"></div></div>
+      </div>
+    </div>
+    <div class="col"><h3>Notes</h3>
+      <p class="note">If more than 4 finish, the toast shows 4 lines and "+3 more". "+3 more" opens the dock.</p>
+      <p class="note">The digest stays up a little longer (12s) because it carries more than one toast does.</p>
     </div>
   </div>
 </section>
