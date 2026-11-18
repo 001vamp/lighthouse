@@ -41,12 +41,35 @@ def _t3_link(link):
     return 't3code://threads/' + link[len(prefix):] if isinstance(link, str) and link.startswith(prefix) else ''
 
 
-def t3_thread(session, lookup):
+def t3_codex_thread(native_id):
+    """The T3 Code thread running a Codex session. T3's Codex sessions share one app-server, so
+    they never see T3CODE_THREAD_ID; T3's own state database maps the Codex thread to its T3
+    thread instead. Read-only; None when T3 isn't installed or didn't start this session."""
+    home = os.environ.get('T3CODE_HOME') or os.path.expanduser('~/.t3')
+    path = os.path.join(home, 'userdata', 'statev2.sqlite')
+    if not native_id or not os.path.exists(path):
+        return None
+    import sqlite3
+    try:
+        db = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=0.5)
+        try:
+            row = db.execute("SELECT thread_id FROM orchestration_v2_projection_provider_threads"
+                             " WHERE provider = 'codex' AND json_extract(payload_json, '$.nativeThreadRef.nativeId') = ?"
+                             " LIMIT 1", (native_id,)).fetchone()
+        finally:
+            db.close()
+    except sqlite3.Error:
+        return None
+    return row[0] if row and isinstance(row[0], str) and row[0] else None
+
+
+def t3_thread(session, lookup, thread=None):
     """The T3 Code thread behind a session T3 started: {"thread", "open", "job"?}, where "job"
     ({"id", "title", "open"}) is the orchestrator thread that spawned it. Looked up once per
     session with T3's own CLI and kept in sessions.json; {} when the lookup failed. None for
-    sessions T3 didn't start, or when this event shouldn't wait on a lookup."""
-    thread = os.environ.get('T3CODE_THREAD_ID')
+    sessions T3 didn't start, or when this event shouldn't wait on a lookup. `thread` is the T3
+    thread when the caller found it some other way (Codex); otherwise T3CODE_THREAD_ID."""
+    thread = thread or os.environ.get('T3CODE_THREAD_ID')
     if not thread:
         return None
     try:

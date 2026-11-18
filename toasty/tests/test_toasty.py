@@ -205,6 +205,38 @@ class Hooks(Env):
         except FileNotFoundError:
             return {}
 
+    def test_codex_session_t3_started_joins_its_job(self):
+        # T3's Codex sessions get no T3CODE_THREAD_ID; T3's state database maps them instead.
+        import sqlite3
+        data = os.path.join(self.tmp, '.t3', 'userdata')
+        os.makedirs(data)
+        db = sqlite3.connect(os.path.join(data, 'statev2.sqlite'))
+        db.execute('CREATE TABLE orchestration_v2_projection_provider_threads (provider TEXT, thread_id TEXT, payload_json TEXT)')
+        db.execute('INSERT INTO orchestration_v2_projection_provider_threads VALUES (?, ?, ?)',
+                   ('codex', 'kid', json.dumps({'nativeThreadRef': {'driver': 'codex', 'nativeId': 'cx'}})))
+        db.commit(); db.close()
+        t3 = os.path.join(self.fakebin, 't3')
+        with open(t3, 'w') as f:
+            f.write('#!/bin/sh\ncase "$3" in\n'
+                    ' kid) echo \'{"thread":{"link":"https://app.t3.codes/threads/E/kid","parentThreadId":"boss"}}\';;\n'
+                    ' boss) echo \'{"thread":{"link":"https://app.t3.codes/threads/E/boss","title":"Big job"}}\';;\n'
+                    'esac\n')
+        os.chmod(t3, 0o755)
+        self.run_hook('toasty-codex-status', {'session_id': 'cx', 'cwd': '/w', 'hook_event_name': 'UserPromptSubmit', 'prompt': 'review'})
+        entry = self.sessions()['cx']
+        self.assertEqual(entry['state'], 'working')
+        self.assertEqual(entry['t3']['job'], {'id': 'boss', 'title': 'Big job', 'open': 't3code://threads/E/boss'})
+        self.assertEqual(entry['open'], 't3code://threads/E/kid', 'opens in T3, not the ChatGPT app')
+        self.run_hook('toasty-codex-status', {'session_id': 'cx', 'cwd': '/w', 'hook_event_name': 'Stop'})
+        entry = self.sessions()['cx']
+        self.assertEqual((entry['state'], entry['open'], entry['t3']['job']['id']), ('done', 't3code://threads/E/kid', 'boss'),
+                         'later events keep the T3 link without another lookup')
+
+        # A Codex session T3 didn't start is left alone, even when launched from a T3 session.
+        self.run_hook('toasty-codex-status', {'session_id': 'solo', 'cwd': '/w', 'hook_event_name': 'UserPromptSubmit'},
+                      dict(self.env, T3CODE_THREAD_ID='kid'))
+        self.assertNotIn('t3', self.sessions()['solo'])
+
     def test_codex_status_lifecycle(self):
         base = {'session_id': 't1', 'cwd': '/work/api'}
         for event, state in (('SessionStart', 'ready'), ('UserPromptSubmit', 'working'), ('PermissionRequest', 'waiting'),
