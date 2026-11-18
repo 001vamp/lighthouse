@@ -7,7 +7,7 @@ Every run is logged, so we can tell which Codex frontends actually call this.
 """
 import glob, json, os, re, subprocess, sys, time
 
-from toastylib import in_desktop_app, other_app_sessions
+from toastylib import in_desktop_app, other_app_sessions, t3_open
 
 NOTIFY = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toasty-notify')
 LOG = os.path.join(os.environ.get('XDG_STATE_HOME', os.path.expanduser('~/.local/state')),
@@ -38,8 +38,12 @@ try:
     if payload.get('type') == 'agent-turn-complete' and thread and not saved_thread(thread):
         log(f'skipped: {thread} is not a saved thread')
     elif payload.get('type') == 'agent-turn-complete':
-        subprocess.run([os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toasty-codex-status')],
-                       input=json.dumps(payload), text=True, timeout=3)
+        try:
+            subprocess.run([os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toasty-codex-status')],
+                           input=json.dumps(payload), text=True, timeout=3)
+        except subprocess.TimeoutExpired:
+            # A slow T3 lookup must never cost the toast: the state was written first.
+            log('status hook timed out; toasting anyway')
         project = os.path.basename(payload.get('cwd') or os.getcwd()) or 'Codex'
         text = str(payload.get('last-assistant-message') or '').strip()
         message = (text[:16000] + ('\n\nPreview limit reached. Open session for the full reply.' if len(text) > 16000 else '')) or 'Finished its turn.'
@@ -52,6 +56,9 @@ try:
             cmd += ['--revision', str(turn)]
         if in_kitty:
             cmd += ['--kitty', '--reply', '--skip-if-focused']
+        elif thread and t3_open(thread):
+            # T3 Code runs this Codex session: Open thread goes to T3, not the ChatGPT app.
+            cmd += ['--open', t3_open(thread)]
         elif in_desktop_app():
             # No supported way to reply into a desktop thread yet, so no reply box.
             cmd += ['--desktop-entry', 'chatgpt']

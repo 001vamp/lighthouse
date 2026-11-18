@@ -12,7 +12,7 @@ and the toast just points at the prompt (and goes when you look at the app).
 """
 import json, os, re, signal, subprocess, sys, time
 
-from toastylib import in_desktop_app, other_app_sessions
+from toastylib import t3_open, in_desktop_app, other_app_sessions
 
 NOTIFY = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toasty-notify')
 LOG = os.path.join(os.environ.get('XDG_STATE_HOME', os.path.expanduser('~/.local/state')),
@@ -76,17 +76,21 @@ def main():
     if kitty:
         cmd += ['--kitty', '--skip-if-focused', '--withdraw-if-focused']
     elif in_desktop_app():
+        t3 = t3_open(data.get('session_id'))
         # The app shows its own approval prompt only once this hook returns, so waiting on the
         # toast would hold the turn. Point at the prompt instead, and return straight away.
         cmd = [NOTIFY, '--agent', 'Codex', '--provider', 'OpenAI', '--kind', 'needs',
                '--context', project, '--timeout', str(WAIT), '--detach', '--withdraw-if-focused',
-               '--desktop-entry', 'chatgpt']
-        if data.get('session_id'):
+               ] + ([] if t3 else ['--desktop-entry', 'chatgpt'])
+        if t3:
+            # T3 Code runs this session: Open thread goes to T3, where its prompt is.
+            cmd += ['--open', t3]
+        elif data.get('session_id'):
             cmd += ['--open', f"codex://threads/{data['session_id']}"]
-        if not other_app_sessions(data.get('session_id'), 'chatgpt'):
+        if not t3 and not other_app_sessions(data.get('session_id'), 'chatgpt'):
             cmd.append('--skip-if-focused')
         subprocess.run(cmd + ['--reason', 'approval', '--code', detail or tool, '--details', full,
-                              title, 'Approve it in ChatGPT.'],
+                              title, 'Approve it in T3 Code.' if t3 else 'Approve it in ChatGPT.'],
                        stdin=subprocess.DEVNULL, timeout=10)
         return
 

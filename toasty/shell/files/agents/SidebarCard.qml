@@ -47,6 +47,9 @@ Shell.Card {
   // "open" is a link back to the exact thread, e.g. codex://threads/<id>.
   readonly property string sessionsPath: Quickshell.env("XDG_RUNTIME_DIR") + "/toasty/sessions.json"
   property var sessions: ({})
+  // Who started each job, kept while the job has members: opening (and so clearing) the
+  // starter's own Done row mustn't take the "from" away from what it started.
+  property var jobStarters: ({})
   FileView {
     id: sessionFile
     path: root.sessionsPath
@@ -192,7 +195,7 @@ Shell.Card {
       if (match) root.knownAgent[w.id] = match.agent;
       const agent = root.knownAgent[w.id] || running;
       list.push({
-        key: "win:" + w.id, reportJson: "", winId: w.id, app: "", link: "", state, leaving: false, kind: "", count: "",
+        key: "win:" + w.id, reportJson: "", winId: w.id, app: "", link: "", state, leaving: false, kind: "", count: "", stale: false, byIcon: "",
         name: agent ? agent.name : "Agent",
         icon: agent ? agent.mascot || "ghost.png" : "ghost.png",
         task: shortTitle(match ? context(title.replace(/^(\[\s*[!.]\s*\]|[⠀-⣿◐◑✳])\s*/, "")) : "", (agent ? agent.name : "Agent") + " session"),
@@ -203,8 +206,8 @@ Shell.Card {
     root.lastRaw = raw;
 
     // Sessions an orchestrator spawned (T3 Code, today) fold into one job row per orchestrator
-    // thread. The orchestrator's own session is the job row; only children that need you
-    // get a row of their own, right under it.
+    // thread. The orchestrator stays an agent row of its own; the job is only what it started,
+    // and says who started it. Only children that need you get a row, right under the job.
     const jobs = {};
     const owners = {};
     for (const sid in root.sessions) {
@@ -220,22 +223,26 @@ Shell.Card {
       const s = root.sessions[sid];
       const at = (s.time || 0) * 1000;
       let state = s.state, leaving = false;
-      if ((state === "working" || state === "waiting" || state === "ready") && now - at > root.statusFreshness) state = "unknown";
+      // Needs you stays until the session says otherwise: going quiet doesn't answer it.
+      if ((state === "working" || state === "ready") && now - at > root.statusFreshness) state = "unknown";
       if (!["ready", "done", "working", "waiting", "paused", "failed", "unknown"].includes(state)) continue;
       const agent = Notifications.State.agent(s.agent) || {};
       const name = agent.name || s.agent || "Agent";
       const job = (s.t3 || {}).job;
       sessionRows[sid] = { key: "session:" + sid, reportJson: JSON.stringify(s), winId: -1, app: s.app || "", link: s.open || "",
-                  state, leaving, name, icon: agent.mascot || "ghost.png", kind: job && job.id ? "child" : "", count: "",
+                  state, leaving, name, icon: agent.mascot || "ghost.png", byIcon: "", kind: job && job.id ? "child" : "", count: "",
+                  stale: state === "waiting" && now - at > root.statusFreshness,
                   task: shortTitle(s.task, name + (context(s.project) ? " · " + context(s.project) : " session")),
                   fullTask: (readable(s.task) || "") + (context(s.project) ? "\nProject: " + context(s.project) : ""),
-                  detail: explanation(state, state === "unknown" ? "" : readable(s.reason), false) };
+                  detail: state === "waiting" && now - at > root.statusFreshness ? "Needs you · no update for 10+ min · open session"
+                      : explanation(state, state === "unknown" ? "" : readable(s.reason), false) };
     }
     const childRows = {};
+    const starters = {};
     for (const id in jobs) {
       const members = jobs[id].children.filter(sid => sessionRows[sid]);
       const owner = sessionRows[owners[id]];
-      const all = (owner ? [owner] : []).concat(members.map(sid => sessionRows[sid]));
+      const all = members.map(sid => sessionRows[sid]);
       if (!members.length) continue;
       const states = all.map(r => r.state);
       const has = st => states.includes(st);
@@ -245,24 +252,29 @@ Shell.Card {
       const waiting = members.filter(sid => sessionRows[sid].state === "waiting").length;
       const finished = members.filter(sid => sessionRows[sid].state === "done").length;
       const reports = {};
-      for (const sid of members.concat(owner ? [owners[id]] : [])) reports[sid] = root.sessions[sid];
+      for (const sid of members) reports[sid] = root.sessions[sid];
       const title = shortTitle(jobs[id].job.title, "Agent job");
+      const known = owner ? { name: owner.name, icon: owner.icon } : root.jobStarters[id] || { name: "", icon: "" };
+      starters[id] = known;
+      const starter = known.name;
       list.push({ key: "job:" + id, reportJson: JSON.stringify(reports), winId: -1, app: "", link: jobs[id].job.open || (owner ? owner.link : ""),
-                  state, leaving: false, name: title, icon: owner ? owner.icon : sessionRows[members[0]].icon,
-                  kind: "job", count: members.some(sid => sessionRows[sid].state === "working") ? finished + "/" + members.length : "",
+                  state, leaving: false, name: title, icon: sessionRows[members[0]].icon, byIcon: known.icon,
+                  kind: "job", stale: all.every(r => r.state !== "waiting" || r.stale), count: members.some(sid => sessionRows[sid].state === "working") ? finished + "/" + members.length : "",
                   task: title,
-                  fullTask: (readable(jobs[id].job.title) || "Agent job") + "\n" + members.length + (members.length === 1 ? " agent: " : " agents: ")
+                  fullTask: (starter ? "Started by " + starter + " in “" : "Started in “") + (readable(jobs[id].job.title) || "Agent job") + "”\n" + members.length + (members.length === 1 ? " agent: " : " agents: ")
                       + members.map(sid => sessionRows[sid].name + " " + root.label(sessionRows[sid].state).toLowerCase()).join(", "),
                   detail: finished + " of " + members.length + " agents finished" + (waiting ? " · " + waiting + (waiting === 1 ? " needs you" : " need you") : "") });
       childRows["job:" + id] = members.filter(sid => ["waiting", "failed", "paused"].includes(sessionRows[sid].state)).map(sid => sessionRows[sid]);
       for (const sid of members) delete sessionRows[sid];
-      if (owner) delete sessionRows[owners[id]];
     }
+    root.jobStarters = starters;
     for (const sid in sessionRows) list.push(sessionRows[sid]);
-    // Distinguish legacy sessions that supplied no task without exposing IDs.
+    // Distinguish legacy sessions that supplied no task without exposing IDs. Jobs are left
+    // out: their "from" already sets them apart from the agent that started them.
     const totals = {}, seen = {};
-    for (const item of list) totals[item.task] = (totals[item.task] || 0) + 1;
-    for (const item of list) {
+    const agentsOnly = list.filter(item => item.kind !== "job");
+    for (const item of agentsOnly) totals[item.task] = (totals[item.task] || 0) + 1;
+    for (const item of agentsOnly) {
       const title = item.task;
       if (totals[title] > 1) item.task += " · " + (seen[title] = (seen[title] || 0) + 1);
     }
@@ -362,7 +374,7 @@ Shell.Card {
   implicitWidth: Shell.Theme.lerp(Shell.Theme.sidebarCardExpandedWidth,
       Shell.Theme.sidebarCardCollapsedWidth, widthProgress)
   implicitHeight: rows.count === 0 ? 0 : rows.count * rowHeight + headerAt.length * headerHeight + 8
-  Behavior on implicitHeight { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
+  Behavior on implicitHeight { NumberAnimation { duration: Notifications.State.reducedMotion ? 0 : 240; easing.type: Easing.OutCubic } }
   visible: implicitHeight > 0
   radius: Shell.Theme.lerp(12, Shell.Theme.sidebarCardRadius, widthProgress)
 
@@ -408,17 +420,19 @@ Shell.Card {
       required property bool leaving
       required property string name
       required property string icon
+      required property string byIcon  // a job's: the mascot of the agent that started it
       required property string fullTask
       required property string task
       required property string detail
       required property string kind    // "job": an orchestrator's agents; "child": one of them
       required property string count   // a job's finished/total agents
+      required property bool stale     // Needs you, but the session has been quiet for a while
       readonly property string status: state
-      readonly property bool dismissible: (key.startsWith("session:") || kind === "job") && state !== "working" && state !== "waiting"
+      readonly property bool dismissible: (key.startsWith("session:") || kind === "job") && state !== "working" && (state !== "waiting" || stale)
       // Children sit a step in, under their job.
       readonly property int indent: kind === "child" ? Math.round(14 * (1 - root.widthProgress)) : 0
       y: 4 + index * root.rowHeight + root.headersAbove(index) * root.headerHeight
-      Behavior on y { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
+      Behavior on y { NumberAnimation { duration: Notifications.State.reducedMotion ? 0 : 240; easing.type: Easing.OutCubic } }
       width: root.width
       height: root.rowHeight
       opacity: leaving ? 0 : 1
@@ -427,7 +441,8 @@ Shell.Card {
       Keys.onReturnPressed: root.open(row)
       Keys.onSpacePressed: root.open(row)
       Accessible.role: Accessible.Button
-      Accessible.name: name + ", " + root.label(status) + ": " + task + ". " + detail
+      readonly property string opens: kind === "job" ? "Open job: " : kind === "child" ? "Open agent thread: " : ""
+      Accessible.name: opens + name + ", " + root.label(status) + ": " + task + ". " + detail
       Accessible.onPressAction: root.open(row)
 
       // The library's Done moment: pill pops, mascot hops, check springs in.
@@ -463,7 +478,7 @@ Shell.Card {
         timeout: 0
         width: 300
         padding: 14
-        text: row.name + "\n" + (row.fullTask || row.task) + "\n" + row.detail
+        text: row.opens + row.name + "\n" + (row.fullTask || row.task) + "\n" + row.detail
         contentItem: Text {
           text: detailTip.text
           textFormat: Text.PlainText
@@ -544,8 +559,8 @@ Shell.Card {
       // A job reads as a group, never as one agent: dashed outline, and its mascot on a stack.
       Shape {
         id: jobOutline
+        // Stays when the dock collapses: that's when a job is easiest to mistake for an agent.
         visible: row.kind === "job"
-        opacity: 1 - root.widthProgress
         x: 4; y: 2
         width: parent.width - 8; height: parent.height - 4
         preferredRendererType: Shape.CurveRenderer
@@ -628,15 +643,36 @@ Shell.Card {
             }
           }
         }
-        Text {
+        // A job says who started it: "from" and that agent's mascot, then the thread's title.
+        Row {
           width: parent.width
-          text: row.task
-          textFormat: Text.PlainText
-          wrapMode: Text.Wrap
-          maximumLineCount: 2
-          elide: Text.ElideRight
-          color: "#F0EDF2"
-          font.family: Shell.Theme.fontFamily; font.pixelSize: 11
+          spacing: 4
+          Text {
+            id: fromLabel
+            visible: row.byIcon !== ""
+            text: "from"
+            color: "#A9A3AD"
+            font.family: Shell.Theme.fontFamily; font.pixelSize: 11
+          }
+          Image {
+            id: fromIcon
+            visible: row.byIcon !== ""
+            y: 1
+            width: 12; height: 12
+            source: row.byIcon ? Qt.resolvedUrl("../assets/agents/" + row.byIcon) : ""
+            sourceSize: Qt.size(24, 24)
+            fillMode: Image.PreserveAspectFit
+          }
+          Text {
+            width: parent.width - (fromLabel.visible ? fromLabel.implicitWidth + fromIcon.width + 8 : 0)
+            text: row.task
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            maximumLineCount: row.byIcon !== "" ? 1 : 2
+            elide: Text.ElideRight
+            color: "#F0EDF2"
+            font.family: Shell.Theme.fontFamily; font.pixelSize: 11
+          }
         }
       }
     }

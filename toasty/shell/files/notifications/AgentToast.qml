@@ -52,6 +52,9 @@ Item {
     return lines.filter(v => v).join("\n");
   }
   property bool expanded: false
+  readonly property var awayLines: away ? notification.lines || [] : []
+  property bool allAway: false
+  property bool echoing: false   // the "Sent" echo is on screen and holds the toast
   readonly property bool approval: kind === "needs" && (actions.some(a => a.identifier === "allow") || notification.codeComplete === false)
   readonly property bool navigable: !!(notification.openUrl || notification.windowId || notification.desktopEntry)
   // Slim layout: one headline ("Claude finished · lighthouse"), a short preview, and links.
@@ -154,16 +157,29 @@ Item {
     if (!text || sent) return;
     delivery = "sending";
     sentText = text;
+    // The field empties as the reply leaves; sentText keeps it to show and, if it fails, to copy.
+    field.text = "";
     field.focus = false;
     root.replied(text);
     if (usesMarkers) {
       confirm.forId = shownId;
+      confirm.forEvent = shownEvent;
       confirm.running = true;
     } else {
+      // Hold first, then show "Sent": the other order lets go of the toast for an instant.
+      root.echoing = true; echoHold.forId = shownId; echoHold.restart();
       delivery = "sent";
       sentClose.forId = shownId;
       sentClose.start();
     }
+  }
+
+  // While you write or send a reply, nothing that arrives may replace this toast.
+  Binding {
+    target: Notifications.State
+    property: "replyHeld"
+    value: root.visible && (field.text.length > 0 || field.activeFocus || root.delivery === "sending" || root.echoing)
+    restoreMode: Binding.RestoreValue
   }
 
   // The same notification comes back as a fresh object whenever its text or icon changes;
@@ -173,21 +189,30 @@ Item {
   onNotificationChanged: {
     const event = String((notification || {}).id || "") + ":" + String((notification || {}).eventRevision || "");
     if (event === shownEvent) return;
+    // A new revision of the toast you're replying in updates its text but keeps your draft.
+    const sameCard = String((notification || {}).id || "") === shownId;
     shownEvent = event;
+    if (sameCard && (field.text.length > 0 || delivery === "sending")) return;
     shownId = (notification || {}).id || "";
     // Anything still in flight belongs to the previous notification.
     probe.running = false;
     actionProbe.running = false;
     confirm.running = false;
     sentClose.stop();
+    echoHold.stop();
+    echoing = false;
     delivery = "";
     sentText = "";
     expanded = false;
+    allAway = false;
     pickedUp = false;
     pickup.stop();
     listening = true;
     field.text = "";
     remaining = 1;
+    // Back after stepping aside for something urgent: the reply that failed is still here to copy.
+    const kept = (Notifications.State.failedReplies || {})[shownEvent];
+    if (kept) { sentText = kept; delivery = "failed"; }
     const n = notification || {};
     usesMarkers = /^(Toasty|PondAgent)\|/.test(String(n.appName || "")) && !!n.serverId;
     markerPath = Notifications.State.markerDir + "/" + (n.serverId || 0);
@@ -220,9 +245,14 @@ Item {
   Process {
     id: confirm
     property string forId: ""
+    property string forEvent: ""
     command: root.waitFor.concat([root.markerPath + ".delivered"])
     onExited: code => {
       if (forId !== root.shownId) return;
+      // Saved first, under this exact event: failing lets go of the toast, and something
+      // urgent may take its place at once.
+      if (code !== 0) Notifications.State.failedReplies = Object.assign({}, Notifications.State.failedReplies, { [forEvent]: root.sentText });
+      if (code === 0) { root.echoing = true; echoHold.forId = forId; echoHold.restart(); }
       root.delivery = code === 0 ? "sent" : "failed";
       if (code === 0) { pickup.forId = forId; pickup.since = Date.now(); pickup.start(); }
     }
@@ -420,13 +450,24 @@ Item {
 
       // While you were away: one line per event, Waiting first. Each opens its agent;
       // the card goes once every line is opened, or with the close button.
+      // Four lines at most; "+N more" shows the rest in a list that scrolls past five.
       Item { width: 1; height: 4; visible: root.away }
-      Column {
+      Flickable {
+        id: awayFlick
         visible: root.away
+        width: parent.width
+        // Stops partway through a row, so a list that scrolls looks like one.
+        height: Math.min(awayList.height, 5.5 * 30)
+        contentHeight: awayList.height
+        interactive: contentHeight > height
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+      Column {
+        id: awayList
         width: parent.width
         spacing: 2
         Repeater {
-          model: root.away ? root.notification.lines || [] : []
+          model: !root.away ? [] : root.allAway ? root.awayLines : root.awayLines.slice(0, 4)
           delegate: Rectangle {
             id: awayLine
             required property var modelData
@@ -435,6 +476,12 @@ Item {
             color: lineArea.containsMouse || activeFocus ? root.hoverFill : "transparent"
             opacity: opened ? 0.5 : 1
             activeFocusOnTab: true
+            // Tabbing into a row the list has scrolled past brings the whole row into view.
+            onActiveFocusChanged: if (activeFocus) {
+              const flick = awayFlick;
+              if (y < flick.contentY) flick.contentY = y;
+              else if (y + height > flick.contentY + flick.height) flick.contentY = y + height - flick.height;
+            }
             border.width: activeFocus ? 2 : 0
             border.color: root.focusRing
             Accessible.role: Accessible.Button
@@ -469,6 +516,14 @@ Item {
             }
           }
         }
+      }
+      }
+      Notifications.AgentButton {
+        visible: root.away && !root.allAway && root.awayLines.length > 4
+        flat: true
+        label: "+" + (root.awayLines.length - 4) + " more"
+        ink: root.ink; surface: root.surface; line: root.line; hoverFill: root.hoverFill
+        onClicked: root.allAway = true
       }
 
       // Actions from the sender, first one primary; wraps if they don't fit.
@@ -645,7 +700,7 @@ Item {
           width: parent.width - (deliveryMark.visible ? deliveryMark.width + 8 : 0)
           anchors.verticalCenter: parent.verticalCenter
           text: root.delivery === "sending" ? "Sending “" + root.sentText + "”…"
-              : root.delivery === "failed" ? "Couldn’t deliver to " + root.identity.name
+              : root.delivery === "failed" ? "Couldn’t confirm " + root.identity.name + " got your reply"
               : (root.pickedUp ? root.identity.name + " is on it: “" : "Sent: “") + root.sentText + "”"
           textFormat: Text.PlainText
           color: root.delivery === "failed" ? root.ink : root.muted
@@ -659,9 +714,30 @@ Item {
         id: failedHelp
         width: parent.width
         visible: root.delivery === "failed"
-        text: "The session isn’t listening anymore. Open it to reply there."
+        text: "Open the thread to check before sending it again. Your reply:"
         color: root.muted; font.family: Shell.Theme.fontFamily; font.pixelSize: 12
         wrapMode: Text.Wrap; lineHeight: 16; lineHeightMode: Text.FixedHeight
+      }
+      // What you wrote, kept so it isn't lost: select it to copy it into the thread.
+      Item { width: 1; height: 6; visible: failedHelp.visible }
+      Rectangle {
+        visible: failedHelp.visible
+        width: parent.width
+        height: keptReply.contentHeight + 12
+        radius: 8
+        color: root.hoverFill
+        TextEdit {
+          id: keptReply
+          x: 8; y: 6; width: parent.width - 16
+          text: root.sentText
+          readOnly: true; selectByMouse: true; selectByKeyboard: true
+          activeFocusOnTab: true
+          Accessible.role: Accessible.StaticText
+          Accessible.name: "Your reply: " + root.sentText
+          textFormat: TextEdit.PlainText; wrapMode: TextEdit.Wrap
+          color: root.ink; selectionColor: root.focusRing; selectedTextColor: "white"
+          font.family: Shell.Theme.fontFamily; font.pixelSize: 12
+        }
       }
     }
 
@@ -771,6 +847,19 @@ Item {
         sentClose.forId = forId;
         sentClose.start();
       }
+    }
+  }
+  // "Sent" stays up long enough to read, even with something urgent waiting; then, if anything
+  // is waiting, this toast's job is done and it makes way instead of coming back later.
+  Timer {
+    id: echoHold
+    property string forId: ""
+    interval: 1200
+    // Dismiss first, then let go: letting go first would send this toast back into the line.
+    onTriggered: {
+      if (forId !== root.shownId) return;   // only ever closes the toast it was started for
+      if (Notifications.State.queue.length) root.dismissed();
+      root.echoing = false;
     }
   }
   Timer {

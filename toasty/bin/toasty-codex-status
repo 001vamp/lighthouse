@@ -13,7 +13,7 @@ import tempfile
 import time
 import uuid
 
-from toastylib import in_desktop_app
+from toastylib import in_desktop_app, t3_codex_thread, t3_thread, with_t3
 
 
 def update(data):
@@ -44,23 +44,42 @@ def update(data):
     runtime = os.path.join(runtime, 'toasty')
     os.makedirs(runtime, mode=0o700, exist_ok=True)
     path = Path(runtime) / 'sessions.json'
-    with open(str(path) + '.lock', 'a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        try:
-            sessions = json.loads(path.read_text())
-        except FileNotFoundError:
-            sessions = {}
-        if not isinstance(sessions, dict):
-            raise ValueError('session registry is not an object')
+
+    def write(edit):
+        """Change sessions.json under its lock. `edit` changes the dict in place; False = no write."""
+        with open(str(path) + '.lock', 'a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                sessions = json.loads(path.read_text())
+            except FileNotFoundError:
+                sessions = {}
+            if not isinstance(sessions, dict):
+                raise ValueError('session registry is not an object')
+            if edit(sessions) is False:
+                return
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(mode='w', dir=runtime,
+                        prefix='sessions.', delete=False) as output:
+                    temporary = output.name
+                    json.dump(sessions, output)
+                os.replace(temporary, path)
+            finally:
+                if temporary and os.path.exists(temporary):
+                    os.unlink(temporary)
+
+    looked_up = {}
+
+    def edit(sessions):
         if ended:
             if sid not in sessions:
-                return
+                return False
             del sessions[sid]
         else:
             # Tool completions refresh active sessions without resurrecting paused
             # sessions or overwriting a finished turn.
             if event == 'PostToolUse' and sessions.get(sid, {}).get('state') not in ('waiting', 'working'):
-                return
+                return False
             previous = sessions.get(sid, {})
             project = Path(data.get('cwd') or os.getcwd()).name or 'Codex'
             sessions[sid] = {**previous, 'agent': 'Codex', 'project': project,
@@ -68,6 +87,9 @@ def update(data):
                              'app': ''}
             if in_desktop_app():
                 sessions[sid].update(app='chatgpt', open='codex://threads/' + sid)
+            # A session T3 Code started opens in T3 and folds into its orchestrator's job.
+            with_t3(sessions[sid], previous.get('t3'))
+            looked_up['t3'] = previous.get('t3')
             if event == 'UserPromptSubmit' and (not previous.get('task') or previous.get('task', '').strip().lower() in ('hi', 'hello', 'ok', 'yes', 'continue', 'do tht', 'do that', 'do it')):
                 sessions[sid]['task'] = data.get('prompt') if isinstance(data.get('prompt'), str) else ''
             elif event == 'SessionStart' and previous:
@@ -75,16 +97,27 @@ def update(data):
             sessions[sid]['reason'] = ('Interrupted' if event == 'Interrupt' else
                 'Usage limit reached' if states[event] == 'paused' else
                 'Could not finish; open the session for details' if states[event] == 'failed' else '')
-        temporary = None
-        try:
-            with tempfile.NamedTemporaryFile(mode='w', dir=runtime,
-                    prefix='sessions.', delete=False) as output:
-                temporary = output.name
-                json.dump(sessions, output)
-            os.replace(temporary, path)
-        finally:
-            if temporary and os.path.exists(temporary):
-                os.unlink(temporary)
+    write(edit)
+
+    # Look the T3 thread up once, after the state is written, so a slow lookup never holds
+    # back (or lands after) a newer state.
+    if ended or 't3' not in looked_up or looked_up['t3'] is not None \
+            or event not in ('SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop', 'agent-turn-complete'):
+        return
+    # Only T3's own record counts: T3CODE_THREAD_ID here would belong to whatever T3 session
+    # launched this Codex, not to this session.
+    thread = t3_codex_thread(sid)
+    found = t3_thread(sid, True, thread) if thread else None
+    # A failed lookup ({}) isn't kept, so the next event tries again instead of the session
+    # falling back to ChatGPT links for good.
+    if not found:
+        return
+
+    def attach(sessions):
+        if sid not in sessions or 't3' in sessions[sid]:
+            return False
+        with_t3(sessions[sid], found)
+    write(attach)
 
 
 def main():

@@ -59,7 +59,7 @@ index 73add93..f73913c 100644
    readonly property real previewOpacity: inlineAmount >= 0.54 ? 1 : 0
    readonly property var notification: Notifications.State.currentTransient
 diff --git c/notifications/State.qml w/notifications/State.qml
-index 368ef1b..bd5b0d0 100644
+index 368ef1b..89f3ebf 100644
 --- c/notifications/State.qml
 +++ w/notifications/State.qml
 @@ -3,6 +3,7 @@ import QtQuick
@@ -70,12 +70,30 @@ index 368ef1b..bd5b0d0 100644
  import ".." as Shell
  
  Singleton {
-@@ -13,12 +14,89 @@ Singleton {
+@@ -13,12 +14,107 @@ Singleton {
    readonly property var recentApps: _recentApps(historyNotifications)
    property string transientId: ""
    property string transientOutputName: ""
 +  // Toasts waiting their turn while another is on screen: critical ones first, then oldest first.
 +  property var queue: []
++  // The toast on screen holds a reply you're writing or sending: nothing replaces it until it lets go.
++  property bool replyHeld: false
++  // Replies whose delivery couldn't be confirmed, by toast event (id:revision): shown again if that
++  // same event steps aside for something urgent and returns.
++  property var failedReplies: ({})
++  // Letting go of a reply gives a waiting "Needs you" its turn, by the same rule as on arrival.
++  onReplyHeldChanged: {
++    if (replyHeld || transientId === "" || !queue.length) return;
++    const next = queue[0];
++    if (live[next]?.notification.urgency !== NotificationUrgency.Critical) return;
++    const kindOf = q => { const h = live[q]?.notification.hints || {}; return String(h["x-toasty-kind"] || h["x-pond-kind"] || ""); };
++    const yields = live[transientId]?.notification.urgency !== NotificationUrgency.Critical
++        || (kindOf(next) === "needs" && (kindOf(transientId) === "paused" || kindOf(transientId) === "failed"));
++    if (!yields) return;
++    const rest = queue.slice(1);
++    queue = _stepAside(transientId, rest);
++    _show(next);
++  }
    readonly property var currentTransient: _findById(activeNotifications, transientId)
    readonly property bool transientVisible: transientId !== "" && currentTransient !== null && !panelOpen
    property bool panelOpen: false
@@ -160,7 +178,7 @@ index 368ef1b..bd5b0d0 100644
    property bool historyWritable: false
  
    SystemClock {
-@@ -75,24 +153,268 @@ Singleton {
+@@ -75,24 +171,283 @@ Singleton {
      bodySupported: true
      bodyMarkupSupported: false
      imageSupported: false
@@ -227,7 +245,8 @@ index 368ef1b..bd5b0d0 100644
 +  }
 +  function retireObsoleteEvents() {
 +    for (const n of activeNotifications.slice())
-+      if (obsoleteEvent(n)) remove(n);
++      // A toast you're replying in stays until you send or let go; your draft isn't thrown away.
++      if (obsoleteEvent(n) && !(replyHeld && n.id === transientId)) remove(n);
 +    awayLog = awayLog.filter(id => !obsoleteEvent(_findById(historyNotifications, id)));
 +  }
    function receive(notification) {
@@ -358,13 +377,13 @@ index 368ef1b..bd5b0d0 100644
 +    } else if (urgent && breathFor !== "") {
 +      // Needs you now: the Done toast waiting for a breath goes back to the head of the line.
 +      breath.stop();
-+      queue = [breathFor, ...queue];
++      queue = _stepAside(breathFor, queue);
 +      breathFor = "";
 +      _show(id);
-+    } else if (urgent && transientId !== "" && yields(transientId)) {
++    } else if (urgent && transientId !== "" && yields(transientId) && !replyHeld) {
 +      // Something that needs you doesn't wait behind a routine toast: that one steps back
 +      // to the head of the line and gets a fresh timer when it returns.
-+      queue = [transientId, ...queue];
++      queue = _stepAside(transientId, queue);
 +      _show(id);
 +    } else if (urgent) {
 +      const firstNormal = queue.findIndex(yields);
@@ -373,6 +392,14 @@ index 368ef1b..bd5b0d0 100644
 +    } else {
 +      queue = [...queue, id];
 +    }
++  }
++
++  // A toast that steps aside for something urgent goes back in line behind any other urgent
++  // toast already waiting, and ahead of the routine ones.
++  function _stepAside(id, rest) {
++    const at = rest.findIndex(q => live[q]?.notification.urgency !== NotificationUrgency.Critical);
++    const i = at < 0 ? rest.length : at;
++    return [...rest.slice(0, i), id, ...rest.slice(i)];
 +  }
 +
 +  function _welcomeBack() {
@@ -391,7 +418,13 @@ index 368ef1b..bd5b0d0 100644
 +                               desktopEntry: n.desktopEntry })),
 +      opened: [] }, ...activeNotifications];
 +    if (transientId === "" && breathFor === "" && !advance.running) _show(id, true);
-+    else queue = [id, ...queue];
++    else {
++      // Behind anything already waiting that needs you, ahead of the rest.
++      const kindOf = q => { const h = live[q]?.notification.hints || {}; return String(h["x-toasty-kind"] || h["x-pond-kind"] || ""); };
++      const at = queue.findIndex(q => !(live[q]?.notification.urgency === NotificationUrgency.Critical && kindOf(q) === "needs"));
++      const i = at < 0 ? queue.length : at;
++      queue = [...queue.slice(0, i), id, ...queue.slice(i)];
++    }
 +  }
 +
 +  // One line of the welcome-back card: open that agent, keep the card for the rest.
@@ -435,7 +468,7 @@ index 368ef1b..bd5b0d0 100644
      }
    }
  
-@@ -103,10 +425,15 @@ Singleton {
+@@ -103,10 +458,15 @@ Singleton {
        required property var notification
        required property string notificationId
        property bool closed: false
@@ -452,7 +485,7 @@ index 368ef1b..bd5b0d0 100644
          root.activeNotifications = [data, ...root.activeNotifications.filter(n => n.id !== notificationId)];
          if (!notification.transient) {
            const updated = [data, ...root.historyNotifications.filter(n => n.id !== notificationId)];
-@@ -114,14 +441,22 @@ Singleton {
+@@ -114,14 +474,22 @@ Singleton {
            for (const removed of updated.slice(root.historyLimit)) root.remove(removed);
          }
          popupTimeout.restart();
@@ -476,7 +509,7 @@ index 368ef1b..bd5b0d0 100644
          }
        }
        Connections {
-@@ -129,10 +464,21 @@ Singleton {
+@@ -129,10 +497,21 @@ Singleton {
          function onSummaryChanged() { entry.scheduleRefresh(); }
          function onBodyChanged() { entry.scheduleRefresh(); }
          function onAppIconChanged() { entry.scheduleRefresh(); }
@@ -500,7 +533,7 @@ index 368ef1b..bd5b0d0 100644
            entry.destroy();
          }
        }
-@@ -149,6 +495,64 @@ Singleton {
+@@ -149,6 +528,64 @@ Singleton {
      return null;
    }
  
@@ -565,7 +598,7 @@ index 368ef1b..bd5b0d0 100644
    function _identity(notification) {
      const raw = notification.desktopEntry || notification.appName || "unknown";
      return raw.toLowerCase().replace(/[^a-z0-9]+/g, "");
-@@ -175,6 +579,17 @@ Singleton {
+@@ -175,6 +612,17 @@ Singleton {
  
    function iconSource(notification) {
      const rawIcon = String(notification.appIcon || "");
@@ -583,7 +616,7 @@ index 368ef1b..bd5b0d0 100644
      if (rawIcon.startsWith("file:") || rawIcon.startsWith("image:")
          || rawIcon.startsWith("qrc:"))
        return rawIcon;
-@@ -239,17 +654,37 @@ Singleton {
+@@ -239,17 +687,38 @@ Singleton {
    function togglePanel(outputName) {
      if (notificationCount === 0) return;
      if (panelOpen && panelOutputName === outputName) { closePanel(); return; }
@@ -617,12 +650,13 @@ index 368ef1b..bd5b0d0 100644
 +    }
 +    queue = queue.filter(q => q !== id);
      if (transientId === id) transientId = "";
-+    if (breathFor === id) { breath.stop(); breathFor = ""; }
++    // A Done toast retired while it waited for a breath: the next in line still gets its turn.
++    if (breathFor === id) { breath.stop(); breathFor = ""; if (transientId === "" && queue.length) advance.restart(); }
 +    awayLog = awayLog.filter(q => q !== id);
      historyNotifications = historyNotifications.filter(n => n.id !== id);
      activeNotifications = activeNotifications.filter(n => n.id !== id);
      if (live[id]) live[id].notification.dismiss();
-@@ -257,20 +692,64 @@ Singleton {
+@@ -257,20 +726,64 @@ Singleton {
  
    function activate(notification) {
      if (!notification || !notification.id) return;
