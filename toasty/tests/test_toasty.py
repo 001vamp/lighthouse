@@ -216,6 +216,12 @@ class Hooks(Env):
                    ('codex', 'kid', json.dumps({'nativeThreadRef': {'driver': 'codex', 'nativeId': 'cx'}})))
         db.commit(); db.close()
         t3 = os.path.join(self.fakebin, 't3')
+        # T3's CLI fails at first: nothing is cached, so the next event looks again.
+        with open(t3, 'w') as f:
+            f.write('#!/bin/sh\nexit 1\n')
+        os.chmod(t3, 0o755)
+        self.run_hook('toasty-codex-status', {'session_id': 'cx', 'cwd': '/w', 'hook_event_name': 'SessionStart'})
+        self.assertNotIn('t3', self.sessions()['cx'])
         with open(t3, 'w') as f:
             f.write('#!/bin/sh\ncase "$3" in\n'
                     ' kid) echo \'{"thread":{"link":"https://app.t3.codes/threads/E/kid","parentThreadId":"boss"}}\';;\n'

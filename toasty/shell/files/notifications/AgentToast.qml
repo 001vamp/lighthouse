@@ -156,6 +156,8 @@ Item {
     if (!text || sent) return;
     delivery = "sending";
     sentText = text;
+    // The field empties as the reply leaves; sentText keeps it to show and, if it fails, to copy.
+    field.text = "";
     field.focus = false;
     root.replied(text);
     if (usesMarkers) {

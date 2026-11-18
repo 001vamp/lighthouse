@@ -108,7 +108,9 @@ def update(data):
     # launched this Codex, not to this session.
     thread = t3_codex_thread(sid)
     found = t3_thread(sid, True, thread) if thread else None
-    if found is None:
+    # A failed lookup ({}) isn't kept, so the next event tries again instead of the session
+    # falling back to ChatGPT links for good.
+    if not found:
         return
 
     def attach(sessions):
