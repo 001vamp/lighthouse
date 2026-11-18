@@ -238,6 +238,16 @@ class Hooks(Env):
         self.assertEqual((entry['state'], entry['open'], entry['t3']['job']['id']), ('done', 't3code://threads/E/kid', 'boss'),
                          'later events keep the T3 link without another lookup')
 
+        # The parent's lookup fails: "Open job" still goes to the parent, by the child's link.
+        db = sqlite3.connect(os.path.join(data, 'statev2.sqlite'))
+        db.execute('INSERT INTO orchestration_v2_projection_provider_threads VALUES (?, ?, ?)',
+                   ('codex', 'kid2', json.dumps({'nativeThreadRef': {'driver': 'codex', 'nativeId': 'cx2'}})))
+        db.commit(); db.close()
+        with open(t3, 'w') as f:
+            f.write('#!/bin/sh\n[ "$3" = kid2 ] && echo \'{"thread":{"link":"https://app.t3.codes/threads/E/kid2","parentThreadId":"a:b"}}\'\n')
+        self.run_hook('toasty-codex-status', {'session_id': 'cx2', 'cwd': '/w', 'hook_event_name': 'UserPromptSubmit'})
+        self.assertEqual(self.sessions()['cx2']['t3']['job'], {'id': 'a:b', 'title': '', 'open': 't3code://threads/E/a%3Ab'})
+
         # A Codex session T3 didn't start is left alone, even when launched from a T3 session.
         self.run_hook('toasty-codex-status', {'session_id': 'solo', 'cwd': '/w', 'hook_event_name': 'UserPromptSubmit'},
                       dict(self.env, T3CODE_THREAD_ID='kid'))

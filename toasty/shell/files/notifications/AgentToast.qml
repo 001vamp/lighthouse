@@ -204,6 +204,9 @@ Item {
     listening = true;
     field.text = "";
     remaining = 1;
+    // Back after stepping aside for something urgent: the reply that failed is still here to copy.
+    const kept = (Notifications.State.failedReplies || {})[shownId];
+    if (kept) { sentText = kept; delivery = "failed"; }
     const n = notification || {};
     usesMarkers = /^(Toasty|PondAgent)\|/.test(String(n.appName || "")) && !!n.serverId;
     markerPath = Notifications.State.markerDir + "/" + (n.serverId || 0);
@@ -240,6 +243,7 @@ Item {
     onExited: code => {
       if (forId !== root.shownId) return;
       root.delivery = code === 0 ? "sent" : "failed";
+      if (code !== 0) Notifications.State.failedReplies = Object.assign({}, Notifications.State.failedReplies, { [forId]: root.sentText });
       if (code === 0) { pickup.forId = forId; pickup.since = Date.now(); pickup.start(); }
     }
   }

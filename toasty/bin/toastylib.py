@@ -98,7 +98,14 @@ def t3_thread(session, lookup, thread=None):
     parent = me.get('parentThreadId')
     if isinstance(parent, str) and parent:
         job = show(parent) or {}
-        info['job'] = {'id': parent, 'title': str(job.get('title') or '')[:200], 'open': _t3_link(job.get('link'))}
+        # If the parent's lookup fails, its link is still the child's with the parent's id, so
+        # "Open job" always goes somewhere.
+        fallback = ''
+        if info['open']:
+            from urllib.parse import quote
+            fallback = info['open'].rsplit('/', 1)[0] + '/' + quote(parent, safe='')
+        info['job'] = {'id': parent, 'title': str(job.get('title') or '')[:200],
+                       'open': _t3_link(job.get('link')) or fallback}
     return info
 
 
