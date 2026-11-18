@@ -59,7 +59,7 @@ index 73add93..f73913c 100644
    readonly property real previewOpacity: inlineAmount >= 0.54 ? 1 : 0
    readonly property var notification: Notifications.State.currentTransient
 diff --git c/notifications/State.qml w/notifications/State.qml
-index 368ef1b..bd5b0d0 100644
+index 368ef1b..49e86fd 100644
 --- c/notifications/State.qml
 +++ w/notifications/State.qml
 @@ -3,6 +3,7 @@ import QtQuick
@@ -70,12 +70,14 @@ index 368ef1b..bd5b0d0 100644
  import ".." as Shell
  
  Singleton {
-@@ -13,12 +14,89 @@ Singleton {
+@@ -13,12 +14,91 @@ Singleton {
    readonly property var recentApps: _recentApps(historyNotifications)
    property string transientId: ""
    property string transientOutputName: ""
 +  // Toasts waiting their turn while another is on screen: critical ones first, then oldest first.
 +  property var queue: []
++  // The toast on screen holds a reply you're writing or sending: nothing replaces it until it lets go.
++  property bool replyHeld: false
    readonly property var currentTransient: _findById(activeNotifications, transientId)
    readonly property bool transientVisible: transientId !== "" && currentTransient !== null && !panelOpen
    property bool panelOpen: false
@@ -160,7 +162,7 @@ index 368ef1b..bd5b0d0 100644
    property bool historyWritable: false
  
    SystemClock {
-@@ -75,24 +153,268 @@ Singleton {
+@@ -75,24 +155,274 @@ Singleton {
      bodySupported: true
      bodyMarkupSupported: false
      imageSupported: false
@@ -361,7 +363,7 @@ index 368ef1b..bd5b0d0 100644
 +      queue = [breathFor, ...queue];
 +      breathFor = "";
 +      _show(id);
-+    } else if (urgent && transientId !== "" && yields(transientId)) {
++    } else if (urgent && transientId !== "" && yields(transientId) && !replyHeld) {
 +      // Something that needs you doesn't wait behind a routine toast: that one steps back
 +      // to the head of the line and gets a fresh timer when it returns.
 +      queue = [transientId, ...queue];
@@ -391,7 +393,13 @@ index 368ef1b..bd5b0d0 100644
 +                               desktopEntry: n.desktopEntry })),
 +      opened: [] }, ...activeNotifications];
 +    if (transientId === "" && breathFor === "" && !advance.running) _show(id, true);
-+    else queue = [id, ...queue];
++    else {
++      // Behind anything already waiting that needs you, ahead of the rest.
++      const kindOf = q => { const h = live[q]?.notification.hints || {}; return String(h["x-toasty-kind"] || h["x-pond-kind"] || ""); };
++      const at = queue.findIndex(q => !(live[q]?.notification.urgency === NotificationUrgency.Critical && kindOf(q) === "needs"));
++      const i = at < 0 ? queue.length : at;
++      queue = [...queue.slice(0, i), id, ...queue.slice(i)];
++    }
 +  }
 +
 +  // One line of the welcome-back card: open that agent, keep the card for the rest.
@@ -435,7 +443,7 @@ index 368ef1b..bd5b0d0 100644
      }
    }
  
-@@ -103,10 +425,15 @@ Singleton {
+@@ -103,10 +433,15 @@ Singleton {
        required property var notification
        required property string notificationId
        property bool closed: false
@@ -452,7 +460,7 @@ index 368ef1b..bd5b0d0 100644
          root.activeNotifications = [data, ...root.activeNotifications.filter(n => n.id !== notificationId)];
          if (!notification.transient) {
            const updated = [data, ...root.historyNotifications.filter(n => n.id !== notificationId)];
-@@ -114,14 +441,22 @@ Singleton {
+@@ -114,14 +449,22 @@ Singleton {
            for (const removed of updated.slice(root.historyLimit)) root.remove(removed);
          }
          popupTimeout.restart();
@@ -476,7 +484,7 @@ index 368ef1b..bd5b0d0 100644
          }
        }
        Connections {
-@@ -129,10 +464,21 @@ Singleton {
+@@ -129,10 +472,21 @@ Singleton {
          function onSummaryChanged() { entry.scheduleRefresh(); }
          function onBodyChanged() { entry.scheduleRefresh(); }
          function onAppIconChanged() { entry.scheduleRefresh(); }
@@ -500,7 +508,7 @@ index 368ef1b..bd5b0d0 100644
            entry.destroy();
          }
        }
-@@ -149,6 +495,64 @@ Singleton {
+@@ -149,6 +503,64 @@ Singleton {
      return null;
    }
  
@@ -565,7 +573,7 @@ index 368ef1b..bd5b0d0 100644
    function _identity(notification) {
      const raw = notification.desktopEntry || notification.appName || "unknown";
      return raw.toLowerCase().replace(/[^a-z0-9]+/g, "");
-@@ -175,6 +579,17 @@ Singleton {
+@@ -175,6 +587,17 @@ Singleton {
  
    function iconSource(notification) {
      const rawIcon = String(notification.appIcon || "");
@@ -583,7 +591,7 @@ index 368ef1b..bd5b0d0 100644
      if (rawIcon.startsWith("file:") || rawIcon.startsWith("image:")
          || rawIcon.startsWith("qrc:"))
        return rawIcon;
-@@ -239,17 +654,37 @@ Singleton {
+@@ -239,17 +662,37 @@ Singleton {
    function togglePanel(outputName) {
      if (notificationCount === 0) return;
      if (panelOpen && panelOutputName === outputName) { closePanel(); return; }
@@ -622,7 +630,7 @@ index 368ef1b..bd5b0d0 100644
      historyNotifications = historyNotifications.filter(n => n.id !== id);
      activeNotifications = activeNotifications.filter(n => n.id !== id);
      if (live[id]) live[id].notification.dismiss();
-@@ -257,20 +692,64 @@ Singleton {
+@@ -257,20 +700,64 @@ Singleton {
  
    function activate(notification) {
      if (!notification || !notification.id) return;

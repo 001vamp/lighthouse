@@ -52,6 +52,8 @@ Item {
     return lines.filter(v => v).join("\n");
   }
   property bool expanded: false
+  readonly property var awayLines: away ? notification.lines || [] : []
+  property bool allAway: false
   readonly property bool approval: kind === "needs" && (actions.some(a => a.identifier === "allow") || notification.codeComplete === false)
   readonly property bool navigable: !!(notification.openUrl || notification.windowId || notification.desktopEntry)
   // Slim layout: one headline ("Claude finished · lighthouse"), a short preview, and links.
@@ -166,6 +168,14 @@ Item {
     }
   }
 
+  // While you write or send a reply, nothing that arrives may replace this toast.
+  Binding {
+    target: Notifications.State
+    property: "replyHeld"
+    value: root.visible && (field.text.length > 0 || field.activeFocus || root.delivery === "sending")
+    restoreMode: Binding.RestoreValue
+  }
+
   // The same notification comes back as a fresh object whenever its text or icon changes;
   // only a different notification should clear what you're typing or a reply in flight.
   property string shownEvent: ""
@@ -183,6 +193,7 @@ Item {
     delivery = "";
     sentText = "";
     expanded = false;
+    allAway = false;
     pickedUp = false;
     pickup.stop();
     listening = true;
@@ -420,13 +431,23 @@ Item {
 
       // While you were away: one line per event, Waiting first. Each opens its agent;
       // the card goes once every line is opened, or with the close button.
+      // Four lines at most; "+N more" shows the rest in a list that scrolls past five.
       Item { width: 1; height: 4; visible: root.away }
-      Column {
+      Flickable {
         visible: root.away
+        width: parent.width
+        // Stops partway through a row, so a list that scrolls looks like one.
+        height: Math.min(awayList.height, 5.5 * 30)
+        contentHeight: awayList.height
+        interactive: contentHeight > height
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+      Column {
+        id: awayList
         width: parent.width
         spacing: 2
         Repeater {
-          model: root.away ? root.notification.lines || [] : []
+          model: !root.away ? [] : root.allAway ? root.awayLines : root.awayLines.slice(0, 4)
           delegate: Rectangle {
             id: awayLine
             required property var modelData
@@ -469,6 +490,14 @@ Item {
             }
           }
         }
+      }
+      }
+      Notifications.AgentButton {
+        visible: root.away && !root.allAway && root.awayLines.length > 4
+        flat: true
+        label: "+" + (root.awayLines.length - 4) + " more"
+        ink: root.ink; surface: root.surface; line: root.line; hoverFill: root.hoverFill
+        onClicked: root.allAway = true
       }
 
       // Actions from the sender, first one primary; wraps if they don't fit.
@@ -645,7 +674,7 @@ Item {
           width: parent.width - (deliveryMark.visible ? deliveryMark.width + 8 : 0)
           anchors.verticalCenter: parent.verticalCenter
           text: root.delivery === "sending" ? "Sending “" + root.sentText + "”…"
-              : root.delivery === "failed" ? "Couldn’t deliver to " + root.identity.name
+              : root.delivery === "failed" ? "Couldn’t confirm " + root.identity.name + " got your reply"
               : (root.pickedUp ? root.identity.name + " is on it: “" : "Sent: “") + root.sentText + "”"
           textFormat: Text.PlainText
           color: root.delivery === "failed" ? root.ink : root.muted
@@ -659,9 +688,30 @@ Item {
         id: failedHelp
         width: parent.width
         visible: root.delivery === "failed"
-        text: "The session isn’t listening anymore. Open it to reply there."
+        text: "Open the thread to check before sending it again. Your reply:"
         color: root.muted; font.family: Shell.Theme.fontFamily; font.pixelSize: 12
         wrapMode: Text.Wrap; lineHeight: 16; lineHeightMode: Text.FixedHeight
+      }
+      // What you wrote, kept so it isn't lost: select it to copy it into the thread.
+      Item { width: 1; height: 6; visible: failedHelp.visible }
+      Rectangle {
+        visible: failedHelp.visible
+        width: parent.width
+        height: keptReply.contentHeight + 12
+        radius: 8
+        color: root.hoverFill
+        TextEdit {
+          id: keptReply
+          x: 8; y: 6; width: parent.width - 16
+          text: root.sentText
+          readOnly: true; selectByMouse: true; selectByKeyboard: true
+          activeFocusOnTab: true
+          Accessible.role: Accessible.StaticText
+          Accessible.name: "Your reply: " + root.sentText
+          textFormat: TextEdit.PlainText; wrapMode: TextEdit.Wrap
+          color: root.ink; selectionColor: root.focusRing; selectedTextColor: "white"
+          font.family: Shell.Theme.fontFamily; font.pixelSize: 12
+        }
       }
     }
 

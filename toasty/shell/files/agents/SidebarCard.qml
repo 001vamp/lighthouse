@@ -192,7 +192,7 @@ Shell.Card {
       if (match) root.knownAgent[w.id] = match.agent;
       const agent = root.knownAgent[w.id] || running;
       list.push({
-        key: "win:" + w.id, reportJson: "", winId: w.id, app: "", link: "", state, leaving: false, kind: "", count: "",
+        key: "win:" + w.id, reportJson: "", winId: w.id, app: "", link: "", state, leaving: false, kind: "", count: "", stale: false,
         name: agent ? agent.name : "Agent",
         icon: agent ? agent.mascot || "ghost.png" : "ghost.png",
         task: shortTitle(match ? context(title.replace(/^(\[\s*[!.]\s*\]|[⠀-⣿◐◑✳])\s*/, "")) : "", (agent ? agent.name : "Agent") + " session"),
@@ -220,16 +220,19 @@ Shell.Card {
       const s = root.sessions[sid];
       const at = (s.time || 0) * 1000;
       let state = s.state, leaving = false;
-      if ((state === "working" || state === "waiting" || state === "ready") && now - at > root.statusFreshness) state = "unknown";
+      // Needs you stays until the session says otherwise: going quiet doesn't answer it.
+      if ((state === "working" || state === "ready") && now - at > root.statusFreshness) state = "unknown";
       if (!["ready", "done", "working", "waiting", "paused", "failed", "unknown"].includes(state)) continue;
       const agent = Notifications.State.agent(s.agent) || {};
       const name = agent.name || s.agent || "Agent";
       const job = (s.t3 || {}).job;
       sessionRows[sid] = { key: "session:" + sid, reportJson: JSON.stringify(s), winId: -1, app: s.app || "", link: s.open || "",
                   state, leaving, name, icon: agent.mascot || "ghost.png", kind: job && job.id ? "child" : "", count: "",
+                  stale: state === "waiting" && now - at > root.statusFreshness,
                   task: shortTitle(s.task, name + (context(s.project) ? " · " + context(s.project) : " session")),
                   fullTask: (readable(s.task) || "") + (context(s.project) ? "\nProject: " + context(s.project) : ""),
-                  detail: explanation(state, state === "unknown" ? "" : readable(s.reason), false) };
+                  detail: state === "waiting" && now - at > root.statusFreshness ? "Needs you · no update for 10+ min · open session"
+                      : explanation(state, state === "unknown" ? "" : readable(s.reason), false) };
     }
     const childRows = {};
     for (const id in jobs) {
@@ -249,7 +252,7 @@ Shell.Card {
       const title = shortTitle(jobs[id].job.title, "Agent job");
       list.push({ key: "job:" + id, reportJson: JSON.stringify(reports), winId: -1, app: "", link: jobs[id].job.open || (owner ? owner.link : ""),
                   state, leaving: false, name: title, icon: owner ? owner.icon : sessionRows[members[0]].icon,
-                  kind: "job", count: members.some(sid => sessionRows[sid].state === "working") ? finished + "/" + members.length : "",
+                  kind: "job", stale: all.every(r => r.state !== "waiting" || r.stale), count: members.some(sid => sessionRows[sid].state === "working") ? finished + "/" + members.length : "",
                   task: title,
                   fullTask: (readable(jobs[id].job.title) || "Agent job") + "\n" + members.length + (members.length === 1 ? " agent: " : " agents: ")
                       + members.map(sid => sessionRows[sid].name + " " + root.label(sessionRows[sid].state).toLowerCase()).join(", "),
@@ -362,7 +365,7 @@ Shell.Card {
   implicitWidth: Shell.Theme.lerp(Shell.Theme.sidebarCardExpandedWidth,
       Shell.Theme.sidebarCardCollapsedWidth, widthProgress)
   implicitHeight: rows.count === 0 ? 0 : rows.count * rowHeight + headerAt.length * headerHeight + 8
-  Behavior on implicitHeight { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
+  Behavior on implicitHeight { NumberAnimation { duration: Notifications.State.reducedMotion ? 0 : 240; easing.type: Easing.OutCubic } }
   visible: implicitHeight > 0
   radius: Shell.Theme.lerp(12, Shell.Theme.sidebarCardRadius, widthProgress)
 
@@ -413,12 +416,13 @@ Shell.Card {
       required property string detail
       required property string kind    // "job": an orchestrator's agents; "child": one of them
       required property string count   // a job's finished/total agents
+      required property bool stale     // Needs you, but the session has been quiet for a while
       readonly property string status: state
-      readonly property bool dismissible: (key.startsWith("session:") || kind === "job") && state !== "working" && state !== "waiting"
+      readonly property bool dismissible: (key.startsWith("session:") || kind === "job") && state !== "working" && (state !== "waiting" || stale)
       // Children sit a step in, under their job.
       readonly property int indent: kind === "child" ? Math.round(14 * (1 - root.widthProgress)) : 0
       y: 4 + index * root.rowHeight + root.headersAbove(index) * root.headerHeight
-      Behavior on y { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
+      Behavior on y { NumberAnimation { duration: Notifications.State.reducedMotion ? 0 : 240; easing.type: Easing.OutCubic } }
       width: root.width
       height: root.rowHeight
       opacity: leaving ? 0 : 1
@@ -427,7 +431,8 @@ Shell.Card {
       Keys.onReturnPressed: root.open(row)
       Keys.onSpacePressed: root.open(row)
       Accessible.role: Accessible.Button
-      Accessible.name: name + ", " + root.label(status) + ": " + task + ". " + detail
+      readonly property string opens: kind === "job" ? "Open job: " : kind === "child" ? "Open agent thread: " : ""
+      Accessible.name: opens + name + ", " + root.label(status) + ": " + task + ". " + detail
       Accessible.onPressAction: root.open(row)
 
       // The library's Done moment: pill pops, mascot hops, check springs in.
@@ -463,7 +468,7 @@ Shell.Card {
         timeout: 0
         width: 300
         padding: 14
-        text: row.name + "\n" + (row.fullTask || row.task) + "\n" + row.detail
+        text: row.opens + row.name + "\n" + (row.fullTask || row.task) + "\n" + row.detail
         contentItem: Text {
           text: detailTip.text
           textFormat: Text.PlainText
@@ -544,8 +549,8 @@ Shell.Card {
       // A job reads as a group, never as one agent: dashed outline, and its mascot on a stack.
       Shape {
         id: jobOutline
+        // Stays when the dock collapses: that's when a job is easiest to mistake for an agent.
         visible: row.kind === "job"
-        opacity: 1 - root.widthProgress
         x: 4; y: 2
         width: parent.width - 8; height: parent.height - 4
         preferredRendererType: Shape.CurveRenderer
