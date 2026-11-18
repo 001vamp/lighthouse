@@ -59,7 +59,7 @@ index 73add93..f73913c 100644
    readonly property real previewOpacity: inlineAmount >= 0.54 ? 1 : 0
    readonly property var notification: Notifications.State.currentTransient
 diff --git c/notifications/State.qml w/notifications/State.qml
-index 368ef1b..0739923 100644
+index 368ef1b..2d53130 100644
 --- c/notifications/State.qml
 +++ w/notifications/State.qml
 @@ -3,6 +3,7 @@ import QtQuick
@@ -70,7 +70,7 @@ index 368ef1b..0739923 100644
  import ".." as Shell
  
  Singleton {
-@@ -13,12 +14,105 @@ Singleton {
+@@ -13,12 +14,106 @@ Singleton {
    readonly property var recentApps: _recentApps(historyNotifications)
    property string transientId: ""
    property string transientOutputName: ""
@@ -78,7 +78,8 @@ index 368ef1b..0739923 100644
 +  property var queue: []
 +  // The toast on screen holds a reply you're writing or sending: nothing replaces it until it lets go.
 +  property bool replyHeld: false
-+  // Replies whose delivery couldn't be confirmed, by toast: shown again if that toast steps aside and returns.
++  // Replies whose delivery couldn't be confirmed, by toast event (id:revision): shown again if that
++  // same event steps aside for something urgent and returns.
 +  property var failedReplies: ({})
 +  // Letting go of a reply gives a waiting "Needs you" its turn, by the same rule as on arrival.
 +  onReplyHeldChanged: {
@@ -176,7 +177,7 @@ index 368ef1b..0739923 100644
    property bool historyWritable: false
  
    SystemClock {
-@@ -75,24 +169,275 @@ Singleton {
+@@ -75,24 +170,275 @@ Singleton {
      bodySupported: true
      bodyMarkupSupported: false
      imageSupported: false
@@ -458,7 +459,7 @@ index 368ef1b..0739923 100644
      }
    }
  
-@@ -103,10 +448,15 @@ Singleton {
+@@ -103,10 +449,15 @@ Singleton {
        required property var notification
        required property string notificationId
        property bool closed: false
@@ -475,7 +476,7 @@ index 368ef1b..0739923 100644
          root.activeNotifications = [data, ...root.activeNotifications.filter(n => n.id !== notificationId)];
          if (!notification.transient) {
            const updated = [data, ...root.historyNotifications.filter(n => n.id !== notificationId)];
-@@ -114,14 +464,22 @@ Singleton {
+@@ -114,14 +465,22 @@ Singleton {
            for (const removed of updated.slice(root.historyLimit)) root.remove(removed);
          }
          popupTimeout.restart();
@@ -499,7 +500,7 @@ index 368ef1b..0739923 100644
          }
        }
        Connections {
-@@ -129,10 +487,21 @@ Singleton {
+@@ -129,10 +488,21 @@ Singleton {
          function onSummaryChanged() { entry.scheduleRefresh(); }
          function onBodyChanged() { entry.scheduleRefresh(); }
          function onAppIconChanged() { entry.scheduleRefresh(); }
@@ -523,7 +524,7 @@ index 368ef1b..0739923 100644
            entry.destroy();
          }
        }
-@@ -149,6 +518,64 @@ Singleton {
+@@ -149,6 +519,64 @@ Singleton {
      return null;
    }
  
@@ -588,7 +589,7 @@ index 368ef1b..0739923 100644
    function _identity(notification) {
      const raw = notification.desktopEntry || notification.appName || "unknown";
      return raw.toLowerCase().replace(/[^a-z0-9]+/g, "");
-@@ -175,6 +602,17 @@ Singleton {
+@@ -175,6 +603,17 @@ Singleton {
  
    function iconSource(notification) {
      const rawIcon = String(notification.appIcon || "");
@@ -606,7 +607,7 @@ index 368ef1b..0739923 100644
      if (rawIcon.startsWith("file:") || rawIcon.startsWith("image:")
          || rawIcon.startsWith("qrc:"))
        return rawIcon;
-@@ -239,17 +677,37 @@ Singleton {
+@@ -239,17 +678,37 @@ Singleton {
    function togglePanel(outputName) {
      if (notificationCount === 0) return;
      if (panelOpen && panelOutputName === outputName) { closePanel(); return; }
@@ -645,7 +646,7 @@ index 368ef1b..0739923 100644
      historyNotifications = historyNotifications.filter(n => n.id !== id);
      activeNotifications = activeNotifications.filter(n => n.id !== id);
      if (live[id]) live[id].notification.dismiss();
-@@ -257,20 +715,64 @@ Singleton {
+@@ -257,20 +716,64 @@ Singleton {
  
    function activate(notification) {
      if (!notification || !notification.id) return;
