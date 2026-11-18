@@ -47,6 +47,9 @@ Shell.Card {
   // "open" is a link back to the exact thread, e.g. codex://threads/<id>.
   readonly property string sessionsPath: Quickshell.env("XDG_RUNTIME_DIR") + "/toasty/sessions.json"
   property var sessions: ({})
+  // Who started each job, kept while the job has members: opening (and so clearing) the
+  // starter's own Done row mustn't take the "from" away from what it started.
+  property var jobStarters: ({})
   FileView {
     id: sessionFile
     path: root.sessionsPath
@@ -235,6 +238,7 @@ Shell.Card {
                       : explanation(state, state === "unknown" ? "" : readable(s.reason), false) };
     }
     const childRows = {};
+    const starters = {};
     for (const id in jobs) {
       const members = jobs[id].children.filter(sid => sessionRows[sid]);
       const owner = sessionRows[owners[id]];
@@ -250,9 +254,11 @@ Shell.Card {
       const reports = {};
       for (const sid of members) reports[sid] = root.sessions[sid];
       const title = shortTitle(jobs[id].job.title, "Agent job");
-      const starter = owner ? owner.name : "";
+      const known = owner ? { name: owner.name, icon: owner.icon } : root.jobStarters[id] || { name: "", icon: "" };
+      starters[id] = known;
+      const starter = known.name;
       list.push({ key: "job:" + id, reportJson: JSON.stringify(reports), winId: -1, app: "", link: jobs[id].job.open || (owner ? owner.link : ""),
-                  state, leaving: false, name: title, icon: sessionRows[members[0]].icon, byIcon: owner ? owner.icon : "",
+                  state, leaving: false, name: title, icon: sessionRows[members[0]].icon, byIcon: known.icon,
                   kind: "job", stale: all.every(r => r.state !== "waiting" || r.stale), count: members.some(sid => sessionRows[sid].state === "working") ? finished + "/" + members.length : "",
                   task: title,
                   fullTask: (starter ? "Started by " + starter + " in “" : "Started in “") + (readable(jobs[id].job.title) || "Agent job") + "”\n" + members.length + (members.length === 1 ? " agent: " : " agents: ")
@@ -261,11 +267,14 @@ Shell.Card {
       childRows["job:" + id] = members.filter(sid => ["waiting", "failed", "paused"].includes(sessionRows[sid].state)).map(sid => sessionRows[sid]);
       for (const sid of members) delete sessionRows[sid];
     }
+    root.jobStarters = starters;
     for (const sid in sessionRows) list.push(sessionRows[sid]);
-    // Distinguish legacy sessions that supplied no task without exposing IDs.
+    // Distinguish legacy sessions that supplied no task without exposing IDs. Jobs are left
+    // out: their "from" already sets them apart from the agent that started them.
     const totals = {}, seen = {};
-    for (const item of list) totals[item.task] = (totals[item.task] || 0) + 1;
-    for (const item of list) {
+    const agentsOnly = list.filter(item => item.kind !== "job");
+    for (const item of agentsOnly) totals[item.task] = (totals[item.task] || 0) + 1;
+    for (const item of agentsOnly) {
       const title = item.task;
       if (totals[title] > 1) item.task += " · " + (seen[title] = (seen[title] || 0) + 1);
     }
