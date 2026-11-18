@@ -59,7 +59,7 @@ index 73add93..f73913c 100644
    readonly property real previewOpacity: inlineAmount >= 0.54 ? 1 : 0
    readonly property var notification: Notifications.State.currentTransient
 diff --git c/notifications/State.qml w/notifications/State.qml
-index 368ef1b..3526be4 100644
+index 368ef1b..89f3ebf 100644
 --- c/notifications/State.qml
 +++ w/notifications/State.qml
 @@ -3,6 +3,7 @@ import QtQuick
@@ -616,7 +616,7 @@ index 368ef1b..3526be4 100644
      if (rawIcon.startsWith("file:") || rawIcon.startsWith("image:")
          || rawIcon.startsWith("qrc:"))
        return rawIcon;
-@@ -239,17 +687,37 @@ Singleton {
+@@ -239,17 +687,38 @@ Singleton {
    function togglePanel(outputName) {
      if (notificationCount === 0) return;
      if (panelOpen && panelOutputName === outputName) { closePanel(); return; }
@@ -650,12 +650,13 @@ index 368ef1b..3526be4 100644
 +    }
 +    queue = queue.filter(q => q !== id);
      if (transientId === id) transientId = "";
-+    if (breathFor === id) { breath.stop(); breathFor = ""; }
++    // A Done toast retired while it waited for a breath: the next in line still gets its turn.
++    if (breathFor === id) { breath.stop(); breathFor = ""; if (transientId === "" && queue.length) advance.restart(); }
 +    awayLog = awayLog.filter(q => q !== id);
      historyNotifications = historyNotifications.filter(n => n.id !== id);
      activeNotifications = activeNotifications.filter(n => n.id !== id);
      if (live[id]) live[id].notification.dismiss();
-@@ -257,20 +725,64 @@ Singleton {
+@@ -257,20 +726,64 @@ Singleton {
  
    function activate(notification) {
      if (!notification || !notification.id) return;
