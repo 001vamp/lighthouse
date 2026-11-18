@@ -166,8 +166,9 @@ Item {
       confirm.forEvent = shownEvent;
       confirm.running = true;
     } else {
+      // Hold first, then show "Sent": the other order lets go of the toast for an instant.
+      root.echoing = true; echoHold.forId = shownId; echoHold.restart();
       delivery = "sent";
-      root.echoing = true; echoHold.restart();
       sentClose.forId = shownId;
       sentClose.start();
     }
@@ -251,8 +252,9 @@ Item {
       // Saved first, under this exact event: failing lets go of the toast, and something
       // urgent may take its place at once.
       if (code !== 0) Notifications.State.failedReplies = Object.assign({}, Notifications.State.failedReplies, { [forEvent]: root.sentText });
+      if (code === 0) { root.echoing = true; echoHold.forId = forId; echoHold.restart(); }
       root.delivery = code === 0 ? "sent" : "failed";
-      if (code === 0) { root.echoing = true; echoHold.restart(); pickup.forId = forId; pickup.since = Date.now(); pickup.start(); }
+      if (code === 0) { pickup.forId = forId; pickup.since = Date.now(); pickup.start(); }
     }
   }
 
@@ -851,9 +853,14 @@ Item {
   // is waiting, this toast's job is done and it makes way instead of coming back later.
   Timer {
     id: echoHold
+    property string forId: ""
     interval: 1200
     // Dismiss first, then let go: letting go first would send this toast back into the line.
-    onTriggered: { if (Notifications.State.queue.length) root.dismissed(); root.echoing = false; }
+    onTriggered: {
+      if (forId !== root.shownId) return;   // only ever closes the toast it was started for
+      if (Notifications.State.queue.length) root.dismissed();
+      root.echoing = false;
+    }
   }
   Timer {
     id: sentClose
